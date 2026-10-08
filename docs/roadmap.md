@@ -15,8 +15,8 @@ nothing here is a scheduled commitment, and the order changes when a real need d
   backoff, survives backend restarts, stops promptly on `SIGTERM`.
 - **`backend_status`** tells a client whether the backend is reachable without provoking a
   failing call.
-- Runs as a **`systemd --user` service**; configured by env vars or a standard `mcpServers`
-  JSON file.
+- Runs as a **`systemd --user` service**, or under a **per-user `supervisord`** where systemd
+  user services are unavailable; configured by env vars or a standard `mcpServers` JSON file.
 - **Fronts stdio backends too** — a backend started as a child process (`command`/`args`/`env`/
   `cwd` in the `mcpServers` config) gets the same serialization, session termination, schema
   parity and resilience as an HTTP backend. The proxy owns that subprocess's whole life: starts
@@ -31,16 +31,15 @@ nothing here is a scheduled commitment, and the order changes when a real need d
 
 ## Next: run it where you run things
 
-One `systemd --user` recipe assumes systemd, a user session, and lingering enabled. That
-assumption doesn't hold everywhere the proxy is useful.
+The `systemd --user` and `supervisord` recipes both assume a Python toolchain and a checkout on
+the host. That assumption doesn't hold everywhere the proxy is useful.
 
-**Intent.** A container image, and a process-supervisor configuration for hosts without systemd
-user services. Configure and inject the backend secret the way a container operator normally
-would; no Python toolchain on the host; the secret never baked into an image layer.
+**Intent.** A container image. Configure and inject the backend secret the way a container
+operator normally would; no Python toolchain on the host; the secret never baked into an image
+layer.
 
 **Expected result.** `docker run` with your backend config and a port mapping, point an agent at
-it, and the tools are there. Under a supervisor: drop in the config, kill the process, it comes
-back, logs land where the supervisor puts them, and stop is clean and prompt.
+it, and the tools are there.
 
 *Scope note:* the shipped image fronts backends **you already run** (HTTP). A stdio backend has
 to live inside the container to be spawnable at all, so that case is served by a documented

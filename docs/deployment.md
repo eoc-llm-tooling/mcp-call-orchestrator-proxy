@@ -1,6 +1,8 @@
 # Deployment
 
-Running the proxy as a `systemd --user` service.
+Running the proxy as a background service: as a `systemd --user` service, or
+under a per-user `supervisord` where systemd user services are unavailable
+(containers, hosts without a user session manager).
 
 ## systemd user service
 
@@ -98,3 +100,128 @@ Editing that env file's contents afterward only needs a `restart`, not a
 changed — the tradeoff is that specifiers like `%h` aren't expanded inside the
 file's content, so any paths in it must be written out in full. See the
 comments in the `.env.example` for details.
+
+## supervisord user instance
+
+A per-user `supervisord` plays the role of `systemd --user`: it runs as the
+user, keeps one `[program:x]` file per service in `~/.config/supervisor/conf.d/`
+(as `~/.config/systemd/user/` holds one unit per service), restarts the proxy
+when it crashes, and logs to files. Templates are in
+[`deploy/supervisor/`](../deploy/supervisor/).
+
+It is separate from any system-wide `supervisord`, such as a container's
+PID 1: it has its own config, socket and processes, and needs no root.
+
+1. **Install supervisor** — the distribution package (`apt install supervisor`)
+   or `uv tool install supervisor`. Only the `supervisord` and `supervisorctl`
+   commands are used; a system-wide instance the package may enable is not
+   involved.
+
+2. **Build the venv and configure the backend** — steps 1 and 2 of the
+   systemd section above.
+
+3. **Configure the settings.** supervisord has no `EnvironmentFile=`, so the
+   program sources an env file through `sh`; `$HOME` expands inside it, unlike
+   in systemd's env files:
+
+   ```bash
+   cp deploy/supervisor/mcp-call-orchestrator-proxy.env.example \
+      ~/.config/mcp-call-orchestrator-proxy/mcp-call-orchestrator-proxy.env
+   chmod 600 ~/.config/mcp-call-orchestrator-proxy/mcp-call-orchestrator-proxy.env
+   $EDITOR ~/.config/mcp-call-orchestrator-proxy/mcp-call-orchestrator-proxy.env
+   ```
+
+4. **Install the configs**, substituting this repo's absolute path for the
+   `__REPO_ROOT__` placeholder:
+
+   ```bash
+   mkdir -p ~/.config/supervisor/conf.d ~/.local/state/supervisor
+   cp deploy/supervisor/supervisord.conf ~/.config/supervisor/
+   sed "s|__REPO_ROOT__|$(pwd)|g" \
+      deploy/supervisor/mcp-call-orchestrator-proxy.conf \
+      > ~/.config/supervisor/conf.d/mcp-call-orchestrator-proxy.conf
+   ```
+
+5. **Point `supervisorctl` at this instance.** Without `-c`, `supervisorctl`
+   searches the working directory and `/etc` for a config, finds the
+   system-wide one (or none), and fails on its root-only socket. A wrapper on
+   `PATH` makes the choice explicit:
+
+   ```bash
+   mkdir -p ~/.local/bin
+   cat > ~/.local/bin/supervisorctl-user <<'EOF'
+   #!/bin/sh
+   exec supervisorctl -c "$HOME/.config/supervisor/supervisord.conf" "$@"
+   EOF
+   chmod +x ~/.local/bin/supervisorctl-user
+   ```
+
+6. **Start it:**
+
+   ```bash
+   supervisord -c ~/.config/supervisor/supervisord.conf
+   supervisorctl-user status
+   ```
+
+   `supervisord` daemonizes and starts every program in `conf.d/`. A program
+   that dies within `startsecs` shows `BACKOFF`, then `FATAL`;
+   `supervisorctl-user tail mcp-call-orchestrator-proxy` shows why (a missing
+   env file, venv or backend config).
+
+7. **Start it at login.** Nothing starts a user `supervisord` by itself. In a
+   desktop session, an XDG autostart entry does it:
+
+   ```ini
+   # ~/.config/autostart/supervisord-user.desktop
+   [Desktop Entry]
+   Type=Application
+   Name=supervisord (user)
+   Exec=sh -c 'mkdir -p "$HOME/.local/state/supervisor" && exec supervisord -c "$HOME/.config/supervisor/supervisord.conf"'
+   NoDisplay=true
+   ```
+
+   Elsewhere, a login-shell profile or a `@reboot` crontab entry running the
+   same command serves.
+
+8. **Watch logs** — files in `~/.local/state/supervisor/`, one per program
+   (rotated at 50 MB, 10 backups — supervisord's defaults):
+
+   ```bash
+   supervisorctl-user tail -f mcp-call-orchestrator-proxy
+   ```
+
+9. **After editing the env file or updating the code**, restart the program;
+   after adding, removing or editing a file in `conf.d/`, reload the configs:
+
+   ```bash
+   supervisorctl-user restart mcp-call-orchestrator-proxy
+   supervisorctl-user reread && supervisorctl-user update
+   ```
+
+| `systemctl --user` | `supervisorctl-user` |
+|---|---|
+| `daemon-reload` | `reread` |
+| `enable --now <unit>` | `update` (starts new and changed programs) |
+| `status` | `status` |
+| `restart <unit>` | `restart <program>` |
+| `journalctl --user -u <unit> -f` | `tail -f <program>` |
+
+The program mirrors the systemd unit's behaviour: `autorestart=unexpected`
+restarts on a non-zero exit or a kill (`Restart=on-failure`), and
+`stopwaitsecs=10` bounds the stop (`TimeoutStopSec=10`). supervisord has no
+restart delay (`RestartSec=`), no sandboxing (`NoNewPrivileges=`,
+`PrivateTmp=`) and no cgroup. A stdio backend runs in a session of its own,
+which the MCP SDK starts it in, so no signal from supervisord reaches it, with
+or without `stopasgroup`/`killasgroup`; it exits when its stdin closes, which
+happens when the proxy stops or dies. A backend that keeps running after end
+of input would outlive a proxy killed with `SIGKILL`, where systemd's cgroup
+would stop it.
+
+### Several instances
+
+One proxy fronts one backend, so each backend gets its own program file, env
+file and backend config. In the copy of the program file, rename the
+`[program:...]` section and point the `command=` at that instance's env file;
+in the env file, set a distinct `MCP_PROXY_LISTEN_PORT` and
+`MCP_PROXY_SERVER_NAME`. Two instances that share a port, so that only one
+runs at a time, take `autostart=false` on the one started by hand.

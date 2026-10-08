@@ -37,8 +37,8 @@ server, unchanged except for the added stability.
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/)
 - A backend MCP server to front. 
-- Linux with a user-level `systemd` if you want the proxy to run as a background
-  service (optional; see [Run as a service](#run-as-a-service)).
+- Linux with a user-level `systemd`, or `supervisord`, if you want the proxy to
+  run as a background service (optional; see [Run as a service](#run-as-a-service)).
 
 ## Installation
 
@@ -223,6 +223,11 @@ boot, with lingering enabled) and stays up whether or not the backend is running
 Unit templates are in [`deploy/systemd/`](deploy/systemd/), and
 [`docs/deployment.md`](docs/deployment.md) walks through installing them.
 
+Where systemd user services are unavailable (a container, a host without a user
+session manager), a per-user `supervisord` runs it instead, with one program file
+per service; templates are in [`deploy/supervisor/`](deploy/supervisor/), covered
+in the same guide.
+
 ## Logs
 
 `MCP_PROXY_LOG_LEVEL` (or `--log-level`) controls verbosity: `DEBUG`, `INFO` (default),
@@ -236,6 +241,8 @@ Records go to stdout/stderr, so under systemd they land in the journal:
 journalctl --user -u mcp-call-orchestrator-proxy -p warning   # outages/recoveries only
 journalctl --user -u mcp-call-orchestrator-proxy -f           # follow at the configured level
 ```
+
+Under supervisord they go to `~/.local/state/supervisor/mcp-call-orchestrator-proxy.log`.
 
 ## Development
 
@@ -256,7 +263,7 @@ network and no backend of your own is needed.
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — canonical technical overview:
   components, call flow, invariants, resilience model.
-- [`docs/deployment.md`](docs/deployment.md) — running the proxy as a systemd user service.
+- [`docs/deployment.md`](docs/deployment.md) — running the proxy as a systemd user service or under supervisord.
 - [`docs/testing.md`](docs/testing.md) — the test tiers and how to add to them.
 - [`docs/coding-standards.md`](docs/coding-standards.md) — code conventions.
 - [`docs/roadmap.md`](docs/roadmap.md) — what's done and what's next.
