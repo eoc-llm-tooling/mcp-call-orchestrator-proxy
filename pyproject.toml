@@ -1,0 +1,120 @@
+[project]
+name = "mcp-call-orchestrator-proxy"
+version = "0.4.2"
+description = "Resilient, serializing MCP proxy in front of a single backend MCP server. Provides stable multi-client MCP access with session management and call orchestration/queuing (e.g. for mcp servers struggling on concurrency)."
+readme = "README.md"
+
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "Vladimir Nazarenko"},
+]
+dependencies = [
+    "fastmcp>=3.4.4",
+    "mcp>=1.28.1",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.2",
+    "typer>=0.26.8",
+]
+
+[project.scripts]
+mcp-call-orchestrator-proxy = "mcp_call_orchestrator_proxy.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_call_orchestrator_proxy"]
+
+[tool.uv]
+package = true
+
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "poethepoet>=0.48.0",
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+# Task runner (poethepoet). Run with: `uv run poe <task>` (e.g. `uv run poe check`).
+[tool.poe.tasks]
+lint = { cmd = "ruff check .", help = "Lint the codebase with ruff" }
+format = { cmd = "ruff format .", help = "Auto-format the codebase with ruff" }
+format-check = { cmd = "ruff format --check .", help = "Check formatting without writing changes" }
+typecheck = { cmd = "mypy src", help = "Type-check the package with mypy" }
+test = { cmd = "pytest tests/unit", help = "Run the offline unit tests" }
+test-component = { cmd = "pytest tests/component", help = "Run offline component tests (real HTTP loopback + mock backend)" }
+test-int = { cmd = "pytest tests/integration", help = "Run integration tests against a real backend (skipped without tests/integration/backend.json)" }
+run = { cmd = "mcp-call-orchestrator-proxy run", help = "Start the proxy server" }
+
+[tool.poe.tasks.check]
+help = "Run the full gate: lint, format check, type-check, unit + component tests, plus integration tests when a backend is configured (skipped cleanly otherwise)"
+sequence = ["lint", "format-check", "typecheck", "test", "test-component", "test-int"]
+default_item_type = "ref"
+
+[tool.poe.tasks.gate]
+help = "Run before every commit: the same steps as check"
+ref = "check"
+
+[tool.poe.tasks.check-py313]
+help = "Run the full gate under Python 3.13, in its own venv, for forward compatibility (not part of the default gate; the floor stays 3.12)"
+cmd = "uv run --python 3.13 poe check"
+env = { UV_PROJECT_ENVIRONMENT = ".venv-py313" }
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "F",      # pyflakes
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "SIM",    # flake8-simplify
+    "RUF",    # ruff-specific
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["mcp_call_orchestrator_proxy"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra -q --strict-markers"
+markers = [
+    "component: offline component tests (real HTTP loopback transport + mock backend)",
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src"
+files = ["src", "tests"]

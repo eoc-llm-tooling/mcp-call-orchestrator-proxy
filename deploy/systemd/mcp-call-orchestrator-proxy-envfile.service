@@ -1,0 +1,38 @@
+[Unit]
+Description=MCP Call-Orchestrator Proxy (resilient, serializing FastMCP proxy in front of a backend MCP server) - env-file variant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# WorkingDirectory and ExecStart below are filled in by the install step in
+# the README ("Run as a systemd user service", step 3).
+WorkingDirectory=__REPO_ROOT__
+ExecStart=__REPO_ROOT__/.venv/bin/mcp-call-orchestrator-proxy run --transport streamable-http
+
+# Alternative to mcp-call-orchestrator-proxy.service: all settings, including
+# secrets, come from an external file instead of from this unit. Use this
+# variant if you want the raw MCP_PROXY_BACKEND_API_KEY / MCP_PROXY_BACKEND_MCP_URL
+# fields (Option 2 in the README) rather than a JSON backend config, or if you
+# just prefer not to have a plaintext (non-secret) config value in the unit
+# file. See deploy/systemd/mcp-call-orchestrator-proxy.env.example.
+#
+# Note: %h and other systemd specifiers are NOT expanded inside the content of
+# an EnvironmentFile= - only in unit directives like this path itself. Any
+# path values set inside the env file must be written out in full.
+EnvironmentFile=%h/.config/mcp-call-orchestrator-proxy/mcp-call-orchestrator-proxy.env
+
+Restart=on-failure
+RestartSec=2
+# The resilience layer's shutdown is prompt by design (interruptible backoff,
+# measured ~0.17s even mid-backoff) - no need for a long stop timeout.
+TimeoutStopSec=10
+
+# Light sandboxing. Kept minimal on purpose: this is a loopback-only local
+# service with no filesystem writes, so we don't fight ProtectSystem/ProtectHome
+# during first-time setup debugging.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

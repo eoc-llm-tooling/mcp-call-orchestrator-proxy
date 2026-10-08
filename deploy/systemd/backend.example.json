@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "some-mcp-server": {
+      "url": "https://127.0.0.1:27124/mcp/",
+      "transport": "http",
+      "auth": "replace-with-your-real-api-key"
+    }
+  }
+}

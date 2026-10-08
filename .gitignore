@@ -1,0 +1,47 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+.venv-py313/
+
+# uv / package manager
+.uv/
+
+# Testing and lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*.code-workspace
+
+# Private agent files
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Integration test secrets (backend config holds the real token)
+tests/integration/backend.json
+tests/integration/.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Crash dumps
+core.[0-9]*
