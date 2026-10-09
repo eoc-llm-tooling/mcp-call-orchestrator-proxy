@@ -111,7 +111,7 @@ backend server gains a tool, or the rule for choosing a backend to test against 
 
 Don't log routine fixes in either — that's git history.
 
-Record a defect found in operation or review in `docs/issues.md` — append-only entries; a
-confirmed root cause is corrected by adding a finding, not by rewriting it. Put forward feature
+Record a defect found in operation or review in `docs/issues.md`, in the structure at its top —
+append-only entries; a confirmed cause is corrected by adding a finding, not by rewriting it. Put forward feature
 work in `docs/roadmap.md`. Write docs in reference register (what the system is and why);
 instructions to agents belong in this file.
