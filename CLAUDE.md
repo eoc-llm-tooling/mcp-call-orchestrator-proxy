@@ -9,6 +9,8 @@ Orientation for agents working in this repository. Keep it short; the deeper mat
 - Never commit paths from your own machine, IP or MAC addresses, internal host names, tokens or
   keys; use the documented defaults or placeholders.
 - Work on a branch and open a pull request; never push to `main`.
+- Issues and pull requests follow the organization's
+  [contribution rules](https://github.com/eoc-llm-tooling/.github/blob/main/CONTRIBUTING.md).
 
 ## Purpose
 
@@ -29,6 +31,8 @@ code or the shipped artifacts may presume a particular backend product.
 - **[`docs/testing.md`](docs/testing.md)** — the test tiers, the shared harness, and which
   backend to test a given claim against. **Read before adding a test.**
 - **[`README.md`](README.md)** — user-facing install, configuration and usage.
+- **[`docs/needs.md`](docs/needs.md)** — what the proxy must do and the limits on how it is
+  built, by need ID.
 - **[`docs/roadmap.md`](docs/roadmap.md)** — what's done, what's open.
 - **[`docs/issues.md`](docs/issues.md)** — defects found, each with its root cause and fix.
 
