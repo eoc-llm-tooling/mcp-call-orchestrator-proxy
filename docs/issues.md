@@ -1,6 +1,6 @@
 # Issues
 
-Problem-resolution log: one Problem Record (`PR-N`) per defect found in operation or on review,
+Problem-resolution log: one Problem Record (`PRB-N`) per defect found in operation or on review,
 tracked to a verified closure. A record holds the durable facts; an investigation trail lives in
 a linked note, not here.
 
@@ -21,11 +21,11 @@ rejected (won't fix or not a bug, reason in Resolution).
 
 | # | Issue | Component | Severity | Status |
 |---|---|---|---|---|
-| PR-1 | Proxy doesn't self-heal after a backend *session* is terminated (clean 404) | resilience (`resilient.py`) | major | [x] |
+| [PRB-1](#prb-1--proxy-doesnt-self-heal-after-a-backend-session-is-terminated-clean-404) | Proxy doesn't self-heal after a backend *session* is terminated (clean 404) | resilience (`resilient.py`) | major | [x] |
 
 ---
 
-## PR-1 — Proxy doesn't self-heal after a backend session is terminated (clean 404)
+## PRB-1 — Proxy doesn't self-heal after a backend session is terminated (clean 404)
 
 **Status:** Closed
 **Severity:** major · **Component:** resilience model ([`resilient.py`](../src/mcp_call_orchestrator_proxy/resilient.py))
