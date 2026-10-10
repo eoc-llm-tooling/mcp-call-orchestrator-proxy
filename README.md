@@ -266,6 +266,7 @@ network and no backend of your own is needed.
 - [`docs/deployment.md`](docs/deployment.md) — running the proxy as a systemd user service or under supervisord.
 - [`docs/testing.md`](docs/testing.md) — the test tiers and how to add to them.
 - [`docs/coding-standards.md`](docs/coding-standards.md) — code conventions.
+- [`docs/needs.md`](docs/needs.md) — what the proxy must do, and the limits on how it is built.
 - [`docs/roadmap.md`](docs/roadmap.md) — what's done and what's next.
 - [`docs/issues.md`](docs/issues.md) — observed defects, each with its root cause
   and fix.
