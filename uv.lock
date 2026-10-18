@@ -758,8 +758,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fastmcp", specifier = ">=3.4.4" },
-    { name = "mcp", specifier = ">=1.28.1" },
+    { name = "fastmcp", specifier = ">=3.4.4,<4" },
+    { name = "mcp", specifier = ">=1.28.1,<2" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "typer", specifier = ">=0.26.8" },
