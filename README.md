@@ -246,7 +246,8 @@ in the same guide.
 `WARNING`, `ERROR`, or `CRITICAL`. `WARNING`+ is backend outages and recoveries, plus what
 only the operator can fix: a misconfigured exposure filter, a call the backend never answered;
 `INFO` adds a record per call as it's queued and as it completes; `DEBUG` adds internal
-detail for fault-finding.
+detail for fault-finding. A 2026-07-28 client's `Mcp-Param-*` headers are checked against the
+tool list the proxy last served, so that check adds neither a record nor a backend call.
 
 Each per-call record names the client by the name it gives itself (`clientInfo`):
 `<name>-<nnn>` for a client on a session-based protocol version, one number per

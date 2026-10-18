@@ -75,7 +75,7 @@ flowchart TD
     C["MCP client(s)<br/>(agents, tools)"] -->|"Streamable HTTP / stdio"| P
 
     subgraph proxy["mcp-call-orchestrator-proxy (one process)"]
-        P["FastMCP + ProxyProvider<br/>server.py — exact schema parity<br/>+ exposure visibility (exposure.py)"]
+        P["FastMCP + ProxyProvider<br/>server.py — exact schema parity<br/>+ exposure visibility (exposure.py)<br/>+ header-check schemas (tool_schemas.py)"]
         M["BackendMetadataMiddleware<br/>metadata.py — initialize / server/discover"]
         E["ExposureAuditBackend<br/>exposure_audit.py — filter-name audit"]
         Q["QueuedMCPBackend<br/>backend.py — queue-aware facade"]
@@ -118,14 +118,19 @@ the Protocol with what a connected client negotiated (capabilities, instructions
 | [`backend.py`](src/mcp_call_orchestrator_proxy/backend.py) | `QueuedMCPBackend` — thin facade that routes every `MCPBackendClient` operation through `orchestrator.submit(...)`. Its `__aenter__/__aexit__` are no-ops (the real connection is opened once by the lifespan, not per call). |
 | [`exposure.py`](src/mcp_call_orchestrator_proxy/exposure.py) | Exposure control, policy side. `resolve_policies` turns the six allow/deny settings into one policy per surface (pure: no I/O, no logging) plus the startup warnings; `apply_exposure_policy` enforces it with FastMCP's scoped `disable`/`enable` visibility on the server. |
 | [`exposure_audit.py`](src/mcp_call_orchestrator_proxy/exposure_audit.py) | `ExposureAuditBackend` — exposure control, audit side. A pass-through `MCPBackendClient` layer above the queue that compares the configured filter names with the backend's first successful listing per surface and warns once per unknown name. Filters and refuses nothing. |
-| [`server.py`](src/mcp_call_orchestrator_proxy/server.py) | `build_proxy_server` — a plain `FastMCP` server with FastMCP's `ProxyProvider` over the facade (not `FastMCPProxy`, not `create_proxy()`), so the duck-typed facade is driven as-is with exact schemas; installs `BackendMetadataMiddleware` and turns off FastMCP's `$ref` inlining (`dereference_schemas=False`). |
+| [`server.py`](src/mcp_call_orchestrator_proxy/server.py) | `build_proxy_server` — a plain `FastMCP` server with FastMCP's `ProxyProvider` over the facade (not `FastMCPProxy`, not `create_proxy()`), so the duck-typed facade is driven as-is with exact schemas; installs `BackendMetadataMiddleware` and `ListedToolSchemas`, gives the MCP SDK's server its tool-schema lookup, and turns off FastMCP's `$ref` inlining (`dereference_schemas=False`). |
+| [`tool_schemas.py`](src/mcp_call_orchestrator_proxy/tool_schemas.py) | `ListedToolSchemas` — middleware that records the tool list the proxy last served its clients, after exposure control, and answers the MCP SDK's input-schema lookup for the `Mcp-Param-*` header check from it. Never calls the backend. |
 | [`metadata.py`](src/mcp_call_orchestrator_proxy/metadata.py) | `BackendMetadataMiddleware` — the proxy's answer to `initialize` and `server/discover`: its own, plus the backend's `instructions`, with only the capabilities the backend has (tools always). Reads `ResilientBackend.metadata`; never calls the backend. |
 | [`app.py`](src/mcp_call_orchestrator_proxy/app.py) | Composition root. `create_proxy_app` wires settings → resilient → orchestrator → queued facade → exposure audit → proxy server, defines the lifespan, registers the proxy-native `backend_status` tool, applies the exposure policy and logs its startup warnings. |
 
 ## Request lifecycle (a tool call)
 
-1. A client calls a tool on the proxy over HTTP/stdio, under either protocol version. The
-   `FastMCP` server receives it and looks the tool up in `ProxyProvider`'s cached listing.
+1. A client calls a tool on the proxy over HTTP/stdio, under either protocol version. Over
+   streamable HTTP, the MCP SDK first checks a 2026-07-28 call's `Mcp-Param-*` headers against
+   the tool's input schema, when the call has arguments or such headers, and refuses a mismatch
+   with HTTP 400. It takes the schema from `ListedToolSchemas`, the tool list the proxy last
+   served; a tool that list does not carry is not checked. The `FastMCP` server receives the
+   call and looks the tool up in `ProxyProvider`'s cached listing.
 2. FastMCP's visibility filter refuses a tool that exposure control hides, as unknown. For a
    visible tool, `ProxyProvider` opens `async with backend:` around the operation and, since
    the backend reports no 2026-07-28 version, calls `call_tool_mcp` on `ExposureAuditBackend`,
@@ -220,7 +225,7 @@ safely against a backend that cannot take them at once. Three levels, each with 
 | Level | Carries |
 |---|---|
 | `WARNING`+ | The backend went away; the backend came back. A call the backend did not answer within its timeout. A configuration only the operator can correct: at startup, an exposure policy the proxy narrowed (allow-list and deny-list both set for a surface; a tool filter that hides `backend_status`), and after the first successful listing of a surface, each filter name the backend does not have — each reported once. Quiet == healthy, so this level is what an alert rule watches. |
-| `INFO` | Two records per call — one on acceptance (client, op, queue depth), one on completion (queue wait, backend exec; for a call the backend declines, such as a method it does not implement, the completion record says so). Arrival order vs. service order, which is the readable proof the queue works. A hang appears as an acceptance with no completion. |
+| `INFO` | Two records per call — one on acceptance (client, op, queue depth), one on completion (queue wait, backend exec; for a call the backend declines, such as a method it does not implement, the completion record says so). Arrival order vs. service order, which is the readable proof the queue works. A hang appears as an acceptance with no completion. The `Mcp-Param-*` header check on a 2026-07-28 tool call reads the tool list the proxy last served (`ListedToolSchemas`), so it adds no operation and no record. |
 | `DEBUG` | One extra record when a call actually starts running, which separates *waiting in the queue* from *at the backend, unanswered* — the two hangs that otherwise look identical. |
 
 Two structural points, both load-bearing:

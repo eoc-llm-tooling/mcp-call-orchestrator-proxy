@@ -18,12 +18,16 @@ nor puts a call on the backend's queue, even with the backend down.
 from __future__ import annotations
 
 import logging
+import re
 import socket
 import sys
 from pathlib import Path
+from typing import Any
 
+import httpx2
 import pytest
 from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
 
 from mcp_call_orchestrator_proxy.app import create_proxy_app
 from mcp_call_orchestrator_proxy.config import ProxySettings
@@ -40,6 +44,19 @@ SESSIONLESS = "2026-07-28"
 # Client mode -> the version the client ends up speaking with the proxy. "auto"
 # asks the proxy with `server/discover`; a pinned version would not ask at all.
 CLIENT_MODES = {"legacy": HANDSHAKE, "auto": SESSIONLESS}
+
+BACKEND_KINDS = pytest.mark.parametrize(
+    "backend_legacy", [True, False], ids=["backend-2025", "backend-2026"]
+)
+
+
+def _queued_ops(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The operations the queue accepted, in order, from its ``call accepted`` log."""
+    accepted = (r.getMessage() for r in caplog.records)
+    return [m.group(1) for m in map(_ACCEPTED_OP.search, accepted) if m]
+
+
+_ACCEPTED_OP = re.compile(r"call accepted .*\bop=(\S+)")
 
 
 @pytest.mark.asyncio
@@ -118,6 +135,100 @@ async def test_the_handshake_puts_nothing_on_the_backend_queue(
             # Control: the same log does show a call that does reach the backend.
             await client.list_tools()
             assert any("call accepted" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+@BACKEND_KINDS
+@pytest.mark.parametrize(
+    "client_mode", list(CLIENT_MODES), ids=["client-2025", "client-2026"]
+)
+async def test_a_tool_call_puts_only_itself_on_the_backend_queue(
+    spawn_backend,
+    backend_config_file,
+    serve_over_http,
+    caplog: pytest.LogCaptureFixture,
+    client_mode: str,
+    backend_legacy: bool,
+) -> None:
+    """A 2026-07-28 call with arguments has its ``Mcp-Param-*`` headers checked
+    against the tool's input schema before dispatch; the proxy takes that schema
+    from the listing it has already served, not from the backend."""
+    backend = spawn_backend(legacy=backend_legacy)
+    proxy_app = create_proxy_app(
+        settings=ProxySettings(backend_config=backend_config_file(backend.url))
+    )
+    caplog.set_level(logging.INFO, logger="mcp_call_orchestrator_proxy")
+
+    async with (
+        serve_over_http(proxy_app.mcp) as url,
+        Client(url, mode=client_mode) as client,
+    ):
+        await client.list_tools()
+        caplog.clear()
+        for i in range(5):
+            echoed = await client.call_tool("echo", {"value": f"call {i}"})
+            assert echoed.content[0].text == f"call {i}"
+        echoed = await client.call_tool("header_echo", {"region": "eu"})
+        assert echoed.content[0].text == "eu"
+
+        assert _queued_ops(caplog) == [
+            *["call_tool:echo"] * 5,
+            "call_tool:header_echo",
+        ]
+        # Control: a listing the client does request is counted.
+        await client.list_tools()
+        assert _queued_ops(caplog)[-1] == "list_tools"
+
+
+def _rewriting_header(name: str, value: str) -> Any:
+    """An HTTP client factory whose requests carry ``value`` in header ``name``
+    wherever the MCP client set it."""
+
+    async def rewrite(request: httpx2.Request) -> None:
+        if name in request.headers:
+            request.headers[name] = value
+
+    def factory(**kwargs: Any) -> httpx2.AsyncClient:
+        return httpx2.AsyncClient(event_hooks={"request": [rewrite]}, **kwargs)
+
+    return factory
+
+
+@pytest.mark.asyncio
+@BACKEND_KINDS
+async def test_a_header_that_differs_from_its_argument_is_refused(
+    spawn_backend,
+    backend_config_file,
+    serve_over_http,
+    caplog: pytest.LogCaptureFixture,
+    backend_legacy: bool,
+) -> None:
+    """The proxy refuses a 2026-07-28 call whose ``Mcp-Param-Region`` header does
+    not carry its ``region`` argument, before anything reaches the backend."""
+    backend = spawn_backend(legacy=backend_legacy)
+    proxy_app = create_proxy_app(
+        settings=ProxySettings(backend_config=backend_config_file(backend.url))
+    )
+    caplog.set_level(logging.INFO, logger="mcp_call_orchestrator_proxy")
+
+    async with serve_over_http(proxy_app.mcp) as url:
+        client = Client(url, mode="auto")
+        assert isinstance(client.transport, StreamableHttpTransport)
+        client.transport.httpx_client_factory = _rewriting_header(
+            "Mcp-Param-Region", "elsewhere"
+        )
+        async with client:
+            assert client.protocol_version == SESSIONLESS
+            await client.list_tools()
+            caplog.clear()
+            with pytest.raises(
+                Exception, match="Mcp-Param-Region header does not match"
+            ):
+                await client.call_tool("header_echo", {"region": "eu"})
+            assert _queued_ops(caplog) == []
+            # Control: a call the rewrite leaves alone is served.
+            echoed = await client.call_tool("echo", {"value": "untouched"})
+            assert echoed.content[0].text == "untouched"
 
 
 def _unused_loopback_url() -> str:

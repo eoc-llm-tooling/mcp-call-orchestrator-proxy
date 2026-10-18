@@ -152,3 +152,43 @@ async def test_proxy_calls_tool_with_its_own_advertised_parameter_names(
 
     assert fake_backend.received_arguments == {"path": "notes/todo.md"}
     assert not result.is_error
+
+
+def _input_schema_lookup(proxy_app: Any) -> Any:
+    lookup = proxy_app.mcp._mcp_server.get_tool_input_schema
+    assert lookup is not None
+    return lookup
+
+
+@pytest.mark.asyncio
+async def test_the_header_check_reads_schemas_from_the_served_listing(
+    fake_settings: ProxySettings,
+) -> None:
+    """The schema lookup the SDK runs before a 2026-07-28 call answers from the
+    listing the proxy served, with no backend call: nothing before a listing,
+    then each listed tool's schema as served, ``backend_status`` included."""
+    proxy_app = create_proxy_app(settings=fake_settings, backend_client=FakeBackend())
+    lookup = _input_schema_lookup(proxy_app)
+
+    async with Client(proxy_app.mcp) as client:
+        assert lookup("vault_read") is None
+        served = {t.name: t.input_schema for t in await client.list_tools()}
+
+    assert lookup("vault_read") == served["vault_read"] == VAULT_READ_SCHEMA
+    assert lookup("backend_status") == served["backend_status"]
+    assert lookup("unknown") is None
+
+
+@pytest.mark.asyncio
+async def test_the_header_check_has_no_schema_for_a_hidden_tool() -> None:
+    """A tool exposure control hides is absent from the listing, so the lookup
+    has no schema for it either, as the backend-listing fallback had none."""
+    settings = ProxySettings(backend_api_key="a" * 32, tool_deny=("vault_read",))
+    proxy_app = create_proxy_app(settings=settings, backend_client=FakeBackend())
+    lookup = _input_schema_lookup(proxy_app)
+
+    async with Client(proxy_app.mcp) as client:
+        assert {t.name for t in await client.list_tools()} == {"backend_status"}
+
+    assert lookup("vault_read") is None
+    assert lookup("backend_status") is not None
