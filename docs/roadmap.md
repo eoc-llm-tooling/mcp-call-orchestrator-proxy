@@ -6,7 +6,7 @@ nothing here is a scheduled commitment, and the order changes when a real need d
 ## Where it is today
 
 - **Exact parity** with the backend's tools, resources and prompts — real names, original
-  schemas, nothing hand-synced.
+  schemas with their `$ref`s and `$defs` as the backend wrote them, nothing hand-synced.
 - **Calls are serialized** through one FIFO queue with a configurable limit (default `1`) and
   a per-call timeout, so a single hung call can't wedge the rest.
 - **Multi-session safe** — independent clients connect over HTTP at once without cross-talk;
