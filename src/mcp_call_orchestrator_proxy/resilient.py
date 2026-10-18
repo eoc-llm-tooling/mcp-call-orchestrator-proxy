@@ -18,8 +18,8 @@ Design notes:
   connection-type error (the authoritative signal) and, when available, the
   underlying client's ``is_connected()``. Reconnection-after-reappear needs no
   polling either - the backoff retry loop *is* the "wait for it to come back".
-- What the backend negotiated (``metadata``: protocol version, server info,
-  capabilities, instructions) is recorded on every connect and kept after the
+- What the backend negotiated (``metadata``: protocol version, capabilities,
+  instructions) is recorded on every connect and kept after the
   connection drops, read from whichever result the protocol version produced:
   the ``initialize`` handshake or ``server/discover``. The proxy answers its own
   clients' ``initialize`` and ``server/discover`` from it, never from the
@@ -117,7 +117,6 @@ class BackendMetadata:
     """
 
     protocol_version: str | None
-    server_info: mcp_types.Implementation | None
     capabilities: mcp_types.ServerCapabilities | None
     instructions: str | None
 
@@ -242,7 +241,6 @@ class ResilientBackend:
                 async with client:
                     self._metadata = BackendMetadata(
                         protocol_version=client.protocol_version,
-                        server_info=client.server_info,
                         capabilities=client.server_capabilities,
                         instructions=client.instructions,
                     )

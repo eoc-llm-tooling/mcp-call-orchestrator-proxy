@@ -92,11 +92,6 @@ class NegotiatedBackendClient(MCPBackendClient, Protocol):
     """
 
     @property
-    def server_info(self) -> mcp_types.Implementation | None:
-        """The backend's server identity."""
-        ...
-
-    @property
     def server_capabilities(self) -> mcp_types.ServerCapabilities | None:
         """The capabilities the backend advertised."""
         ...

@@ -73,10 +73,6 @@ class FakeClient:
         return "2026-07-28" if self.is_connected() else None
 
     @property
-    def server_info(self) -> mcp_types.Implementation | None:
-        return mcp_types.Implementation(name="fake", version="0")
-
-    @property
     def server_capabilities(self) -> mcp_types.ServerCapabilities | None:
         return mcp_types.ServerCapabilities(tools=mcp_types.ToolsCapability())
 
@@ -190,7 +186,6 @@ async def test_records_what_the_backend_negotiated_and_keeps_it_while_down() -> 
         assert await _wait_until(lambda: backend.status_snapshot()["connected"] is True)
         connected = BackendMetadata(
             protocol_version="2026-07-28",
-            server_info=mcp_types.Implementation(name="fake", version="0"),
             capabilities=mcp_types.ServerCapabilities(
                 tools=mcp_types.ToolsCapability()
             ),

@@ -103,8 +103,7 @@ satisfy it structurally, they stack in any order with no adapters — which is w
 independently testable. Its `protocol_version` is `None` at each of the proxy's layers:
 `ProxyProvider` calls a 2026-07-28 backend's session directly, bypassing the Protocol's methods
 and with them the queue, so none of the layers reports that version. `NegotiatedBackendClient` extends
-the Protocol with what a connected client negotiated (server info, capabilities,
-instructions); it is what `ResilientBackend` builds per connection.
+the Protocol with what a connected client negotiated (capabilities, instructions); it is what `ResilientBackend` builds per connection.
 
 ## Module responsibilities
 
@@ -188,8 +187,8 @@ instructions); it is what `ResilientBackend` builds per connection.
   retries don't lock-step. It never hammers a down endpoint.
 - **Fresh client per attempt.** Each (re)connect builds a new `fastmcp.Client` via the
   factory, sidestepping stale-session issues.
-- **Negotiated metadata outlives the connection.** `metadata` (protocol version, server
-  info, capabilities, instructions) is replaced on each connect and kept while the backend is
+- **Negotiated metadata outlives the connection.** `metadata` (protocol version,
+  capabilities, instructions) is replaced on each connect and kept while the backend is
   down, so the proxy's own handshake answers keep the backend's instructions and
   capabilities through an outage. It is `None` only before the first connect.
 - **Prompt shutdown.** The backoff sleep is interruptible by the shutdown event, so

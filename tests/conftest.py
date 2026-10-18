@@ -141,10 +141,6 @@ class ConcurrencyObserver:
         return self._inner.protocol_version
 
     @property
-    def server_info(self) -> mcp_types.Implementation | None:
-        return self._inner.server_info
-
-    @property
     def server_capabilities(self) -> mcp_types.ServerCapabilities | None:
         return self._inner.server_capabilities
 
@@ -228,10 +224,6 @@ class EchoBackend:
     @property
     def protocol_version(self) -> str | None:
         return "2025-11-25"
-
-    @property
-    def server_info(self) -> mcp_types.Implementation | None:
-        return mcp_types.Implementation(name="echo", version="0")
 
     @property
     def server_capabilities(self) -> mcp_types.ServerCapabilities | None:

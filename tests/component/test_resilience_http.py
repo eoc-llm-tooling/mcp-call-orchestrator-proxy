@@ -54,10 +54,6 @@ class GatedEchoBackend:
         return "2025-11-25"
 
     @property
-    def server_info(self) -> mcp_types.Implementation | None:
-        return mcp_types.Implementation(name="gated-echo", version="0")
-
-    @property
     def server_capabilities(self) -> mcp_types.ServerCapabilities | None:
         return mcp_types.ServerCapabilities(tools=mcp_types.ToolsCapability())
 
