@@ -174,14 +174,15 @@ instructions); it is what `ResilientBackend` builds per connection.
   unknown, failed or timed-out tool call also raises `MCPError` (a timeout with the same
   `-32001` code), and treating the whole class as a break would tear the connection down on an
   ordinary error.
-- **A timed-out call fails alone.** A call that outlasts `call_timeout_seconds` fails on the
-  MCP request timeout, which ends that one request, and the connection stays live for the
-  calls queued behind it. The backend's streamable-HTTP client reads for
-  `call_timeout_seconds` plus 5 s for this reason (`client.py::_http_client_factory`):
-  `fastmcp.Client` otherwise sets the HTTP read timeout to the call timeout, and when the read
-  timeout fires first on a 2026-07-28 connection, whose answers are not streamed, the MCP SDK's
-  transport fails as a whole and ends the connection. A timeout is a per-call failure, not a
-  break.
+- **A timed-out call fails alone.** A call that outlasts `call_timeout_seconds` is cancelled
+  by the queue (the MCP request timeout, of the same length, is the backstop), and the MCP SDK
+  abandons that one request, aborting its HTTP request on a 2026-07-28 connection; the
+  connection stays live for the calls queued behind it. The backend's streamable-HTTP client
+  reads for `call_timeout_seconds` plus 5 s for this reason (`client.py::_http_client_factory`):
+  `fastmcp.Client` would otherwise set the HTTP read timeout to the call timeout as well, and
+  when that fires first on a 2026-07-28 connection, whose answers are not streamed, the MCP
+  SDK's transport fails as a whole and ends the connection. A timeout is a per-call failure,
+  not a break.
 - **Bounded, jittered backoff.** Delay grows from `reconnect_initial_backoff_seconds` by
   `reconnect_backoff_multiplier` up to `reconnect_max_backoff_seconds`, with ±20% jitter so
   retries don't lock-step. It never hammers a down endpoint.

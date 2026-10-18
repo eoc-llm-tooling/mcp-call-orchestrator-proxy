@@ -73,21 +73,27 @@ def build_real_backend_client(settings: ProxySettings) -> Client[Any]:
             init_timeout=settings.connect_timeout_seconds,
         )
     if isinstance(client.transport, StreamableHttpTransport):
-        client.transport.httpx_client_factory = _http_client_factory(settings)
+        client.transport.httpx_client_factory = _http_client_factory(
+            verify=settings.backend_verify_tls,
+            read_timeout=settings.call_timeout_seconds + _HTTP_READ_GRACE_SECONDS,
+        )
     return client
 
 
-def _http_client_factory(settings: ProxySettings) -> Callable[..., httpx2.AsyncClient]:
-    """Build the backend's HTTP client with a read timeout that outlasts a call.
+def _http_client_factory(
+    *, verify: bool, read_timeout: float
+) -> Callable[..., httpx2.AsyncClient]:
+    """Build the backend's HTTP client with a read timeout longer than a call.
 
-    `fastmcp.Client` otherwise sets the HTTP read timeout to the call timeout.
-    When the read timeout fires first on a 2026-07-28 connection, whose answers
-    are not streamed, the MCP SDK's transport fails with it as a whole and ends
-    the connection under every call queued behind the hung one. Outlasted, the
-    call timeout fires first and fails that call alone. FastMCP ignores
-    `verify` once a factory is set, so the factory applies it.
+    A call that outlasts its timeout is cancelled by the queue (the MCP request
+    timeout, of the same length, is the backstop), and the MCP SDK then
+    abandons that one request, aborting its HTTP request on a 2026-07-28
+    connection. `fastmcp.Client` would otherwise set the HTTP read timeout to
+    the call timeout as well; when it fires first on a 2026-07-28 connection,
+    whose answers are not streamed, the SDK's transport fails as a whole and
+    ends the connection under every call queued behind the hung one. FastMCP
+    ignores `verify` once a factory is set, so the factory applies it.
     """
-    read_timeout = settings.call_timeout_seconds + _HTTP_READ_GRACE_SECONDS
 
     def factory(
         headers: dict[str, str] | None = None,
@@ -99,7 +105,7 @@ def _http_client_factory(settings: ProxySettings) -> Callable[..., httpx2.AsyncC
         return httpx2.AsyncClient(
             headers=headers,
             auth=auth,
-            verify=settings.backend_verify_tls,
+            verify=verify,
             timeout=httpx2.Timeout(
                 connect=base.connect,
                 read=read_timeout,

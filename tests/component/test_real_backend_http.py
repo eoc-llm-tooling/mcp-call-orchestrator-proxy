@@ -34,6 +34,7 @@ import pytest
 from fastmcp import Client
 
 from mcp_call_orchestrator_proxy.app import create_proxy_app
+from mcp_call_orchestrator_proxy.client import _HTTP_READ_GRACE_SECONDS
 from mcp_call_orchestrator_proxy.config import ProxySettings
 
 pytestmark = pytest.mark.component
@@ -327,9 +328,18 @@ async def test_a_call_queued_behind_a_hung_call_completes(
         )
         hung_result = await asyncio.wait_for(hung, timeout=20.0)
 
+        # Past the backend HTTP client's read timeout: had the hung request not
+        # been abandoned, the read timeout would have ended the connection by now.
+        await asyncio.sleep(settings.call_timeout_seconds + _HTTP_READ_GRACE_SECONDS)
+        later = await queued.call_tool(
+            "echo", {"value": "after the read timeout"}, raise_on_error=False
+        )
+
     assert hung_result.is_error, "the hung call did not fail at the timeout"
     assert not echoed.is_error, f"the queued call failed: {echoed.content}"
     assert echoed.content[0].text == "queued behind the hang"
+    assert not later.is_error, f"the connection did not outlive the hang: {later}"
+    assert later.content[0].text == "after the read timeout"
 
 
 @pytest.mark.asyncio
