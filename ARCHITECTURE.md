@@ -55,9 +55,11 @@ These are load-bearing; changing any of them changes the product.
   plain entry type's `to_transport()`, so the override always reaches the real
   `StdioTransport`.
 - **Severity carries meaning.** A record's level alone says whether the operator is needed:
-  `WARNING`+ is reserved for the backend going away and coming back, `INFO` shows the queue
-  working, `DEBUG` is for fault-finding. A degradation the proxy absorbs by design must never
-  be logged like an unanticipated fault — if a self-healing reconnect looks the same as a real
+  `WARNING`+ is reserved for the backend going away and coming back, and for what only the
+  operator can resolve (a configuration the proxy narrowed or cannot match against the backend,
+  a call the backend never answered); `INFO` shows the queue working, `DEBUG` is for
+  fault-finding. A degradation the proxy absorbs by design must never be logged like an
+  unanticipated fault — if a self-healing reconnect looks the same as a real
   error, the level carries no information and gets ignored. See
   [Observability model](#observability-model).
 
@@ -70,11 +72,13 @@ flowchart TD
     C["MCP client(s)<br/>(agents, tools)"] -->|"Streamable HTTP / stdio"| P
 
     subgraph proxy["mcp-call-orchestrator-proxy (one process)"]
-        P["FastMCPProxy<br/>server.py — exact schema parity"]
+        P["FastMCPProxy<br/>server.py — exact schema parity<br/>+ exposure visibility (exposure.py)"]
+        E["ExposureAuditBackend<br/>exposure_audit.py — filter-name audit"]
         Q["QueuedMCPBackend<br/>backend.py — queue-aware facade"]
         O["CallOrchestrator<br/>orchestrator.py — serializing queue"]
         R["ResilientBackend<br/>resilient.py — self-healing supervisor"]
-        P --> Q
+        P --> E
+        E --> Q
         Q -->|"submit(fn)"| O
         O -->|"runs fn"| R
     end
@@ -88,8 +92,8 @@ flowchart TD
 
 Key seam: every layer speaks the `MCPBackendClient` **Protocol**
 ([`interfaces.py`](src/mcp_call_orchestrator_proxy/interfaces.py)). Because `ResilientBackend`,
-`QueuedMCPBackend`, the real `fastmcp.Client`, and the test doubles all satisfy it
-structurally, they stack in any order with no adapters — which is what makes each layer
+`QueuedMCPBackend`, `ExposureAuditBackend`, the real `fastmcp.Client`, and the test doubles all
+satisfy it structurally, they stack in any order with no adapters — which is what makes each layer
 independently testable.
 
 ## Module responsibilities
@@ -103,16 +107,19 @@ independently testable.
 | [`resilient.py`](src/mcp_call_orchestrator_proxy/resilient.py) | `ResilientBackend` — owns the one live connection and a background supervisor that keeps it healthy across backend restarts. Sits *below* the orchestrator, so it never adds concurrency. Sources `backend_status`. |
 | [`orchestrator.py`](src/mcp_call_orchestrator_proxy/orchestrator.py) | `CallOrchestrator` — MCP-agnostic queue. A single dispatcher pulls FIFO and runs each call as its own task, gated by a semaphore; each call is independently timed out so one hang can't wedge the queue. |
 | [`backend.py`](src/mcp_call_orchestrator_proxy/backend.py) | `QueuedMCPBackend` — thin facade that routes every `MCPBackendClient` operation through `orchestrator.submit(...)`. Its `__aenter__/__aexit__` are no-ops (the real connection is opened once by the lifespan, not per call). |
+| [`exposure.py`](src/mcp_call_orchestrator_proxy/exposure.py) | Exposure control, policy side. `resolve_policies` turns the six allow/deny settings into one policy per surface (pure: no I/O, no logging) plus the startup warnings; `apply_exposure_policy` enforces it with FastMCP's scoped `disable`/`enable` visibility on the server. |
+| [`exposure_audit.py`](src/mcp_call_orchestrator_proxy/exposure_audit.py) | `ExposureAuditBackend` — exposure control, audit side. A pass-through `MCPBackendClient` layer above the queue that compares the configured filter names with the backend's first successful listing per surface and warns once per unknown name. Filters and refuses nothing. |
 | [`server.py`](src/mcp_call_orchestrator_proxy/server.py) | `build_proxy_server` — wraps the facade in `FastMCPProxy` directly (not `create_proxy()`) so the duck-typed facade is driven as-is with exact schemas, and turns off FastMCP's `$ref` inlining (`dereference_schemas=False`). |
-| [`app.py`](src/mcp_call_orchestrator_proxy/app.py) | Composition root. `create_proxy_app` wires settings → resilient → orchestrator → queued facade → proxy server, defines the lifespan, and registers the proxy-native `backend_status` tool. |
+| [`app.py`](src/mcp_call_orchestrator_proxy/app.py) | Composition root. `create_proxy_app` wires settings → resilient → orchestrator → queued facade → exposure audit → proxy server, defines the lifespan, registers the proxy-native `backend_status` tool, applies the exposure policy and logs its startup warnings. |
 
 ## Request lifecycle (a tool call)
 
 1. A client calls a tool on the proxy over HTTP/stdio. `FastMCPProxy` (built with
    `provider_error_strategy="warn"`) receives it.
-2. FastMCP opens `async with backend:` around the operation and calls `call_tool_mcp` on the
-   `QueuedMCPBackend` facade. The facade's context manager is a no-op — the real connection
-   is already open.
+2. FastMCP's visibility filter refuses a tool that exposure control hides, as unknown. For a
+   visible tool, FastMCP opens `async with backend:` around the operation and calls
+   `call_tool_mcp` on `ExposureAuditBackend`, which passes it to the `QueuedMCPBackend`
+   facade. Both context managers are no-ops — the real connection is already open.
 3. The facade wraps the call in a zero-arg coroutine and hands it to
    `CallOrchestrator.submit(...)`. The caller awaits a future.
 4. The dispatcher pulls the call FIFO, acquires a concurrency slot (semaphore), and runs it
@@ -176,7 +183,7 @@ safely against a backend that cannot take them at once. Three levels, each with 
 
 | Level | Carries |
 |---|---|
-| `WARNING`+ | The backend went away; the backend came back. Nothing else. Quiet == healthy, so this level is what an alert rule watches. |
+| `WARNING`+ | The backend went away; the backend came back. A call the backend did not answer within its timeout. A configuration only the operator can correct: at startup, an exposure policy the proxy narrowed (allow-list and deny-list both set for a surface; a tool filter that hides `backend_status`), and after the first successful listing of a surface, each filter name the backend does not have — each reported once. Quiet == healthy, so this level is what an alert rule watches. |
 | `INFO` | Two records per call — one on acceptance (client, op, queue depth), one on completion (queue wait, backend exec; for a call the backend declines, such as a method it does not implement, the completion record says so). Arrival order vs. service order, which is the readable proof the queue works. A hang appears as an acceptance with no completion. |
 | `DEBUG` | One extra record when a call actually starts running, which separates *waiting in the queue* from *at the backend, unanswered* — the two hangs that otherwise look identical. |
 
@@ -231,3 +238,26 @@ secrets unless a config explicitly re-declares them.
 `log_level` is validated to a `Literal` rather than parsed leniently: a silently-ignored
 `--log-level VERBOSE` would leave an operator hunting for `DEBUG` records that were never
 going to be emitted.
+
+## Exposure control
+
+Optional allow-lists and deny-lists of exact names, per surface (tools; resources and resource
+templates as one surface; prompts), set by six `MCP_PROXY_*_ALLOW` / `*_DENY` settings. Off by
+default, which keeps full parity. Two modules, at two places in the chain:
+
+- **Enforcement at the server** (`exposure.py`). `resolve_policies` resolves each surface to
+  unset, allow or deny — an allow-list decides alone when both are set — and `apply_exposure_policy`
+  turns that into FastMCP visibility rules scoped to the surface's component types. FastMCP
+  evaluates them at listing and lookup time, so a hidden item is absent from listings and a call
+  to it by name is answered as an unknown item and never reaches the backend. `backend_status`
+  is filtered like any other tool.
+- **Audit above the queue** (`exposure_audit.py`). `ExposureAuditBackend` passes every operation
+  through unchanged and, on the first successful listing of a surface, compares the configured
+  names with the backend's own (resources against the union of resource URIs and template
+  `uriTemplate`s, once both listings have succeeded). It reads only the listings the proxy
+  already makes, and adds no backend call of its own.
+
+A misconfigured filter never stops the proxy (OCP-C-007): an allow-list that overrides a
+deny-list, or a tool filter that hides `backend_status`, is logged as a `WARNING` at startup; a
+filter name the backend does not have is logged as a `WARNING` once per process. These are the
+operator-facing configuration records the severity rule admits at `WARNING`.

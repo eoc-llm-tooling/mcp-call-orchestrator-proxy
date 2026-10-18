@@ -235,14 +235,15 @@ in the same guide.
 ## Logs
 
 `MCP_PROXY_LOG_LEVEL` (or `--log-level`) controls verbosity: `DEBUG`, `INFO` (default),
-`WARNING`, `ERROR`, or `CRITICAL`. `WARNING`+ is just backend outages and recoveries;
+`WARNING`, `ERROR`, or `CRITICAL`. `WARNING`+ is backend outages and recoveries, plus what
+only the operator can fix: a misconfigured exposure filter, a call the backend never answered;
 `INFO` adds a record per call as it's queued and as it completes; `DEBUG` adds internal
 detail for fault-finding.
 
 Records go to stdout/stderr, so under systemd they land in the journal:
 
 ```bash
-journalctl --user -u mcp-call-orchestrator-proxy -p warning   # outages/recoveries only
+journalctl --user -u mcp-call-orchestrator-proxy -p warning   # outages, recoveries, operator action
 journalctl --user -u mcp-call-orchestrator-proxy -f           # follow at the configured level
 ```
 
