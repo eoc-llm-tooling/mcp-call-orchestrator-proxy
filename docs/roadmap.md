@@ -38,7 +38,7 @@ nothing here is a scheduled commitment, and the order changes when a real need d
 
 ## Next
 
-The next two releases, in order. Each issue is merged and verified on its own; the milestone
+The next releases, in order. Each issue is merged and verified on its own; the milestone
 holds the release's issues.
 
 ### v0.4.3 Safety fixes
@@ -64,6 +64,17 @@ FastMCP 4 brings MCP SDK 2 and the sessionless 2026-07-28 protocol version.
   client side and on the backend side, a server layer of the proxy's own in place of
   `FastMCPProxy`, and the docs brought up to date. Depends on [#2].
 - [#6] — the backend's server `instructions` are not forwarded to clients. Closed by [#5].
+
+### v0.5.1 Queue fixes
+
+Defects in released behaviour where one client's call costs the other clients: a broken
+connection, or an operation on the backend's queue that no client asked for. No new behaviour.
+
+- [#20] — a tool result that does not match the tool's declared output schema tears down the
+  backend connection under every other client's calls, and the caller gets an outage error
+  instead of the result.
+- [#21] — a 2026-07-28 client's tool call with arguments puts an extra `tools/list` on the
+  backend's queue, logged as that client's.
 
 ## Later
 
@@ -143,3 +154,5 @@ Ideas without an issue or a release.
 [#6]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/6
 [#7]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/7
 [#8]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/8
+[#20]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/20
+[#21]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/21
