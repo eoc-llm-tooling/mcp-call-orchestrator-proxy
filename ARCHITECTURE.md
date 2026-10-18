@@ -23,7 +23,9 @@ These are load-bearing; changing any of them changes the product.
 
 - **Exact tool/schema parity.** The proxy exposes the backend's tools/resources/prompts
   under their real names and schemas. Achieved by delegating to FastMCP's own
-  `FastMCPProxy` rather than re-declaring tools. Nothing to hand-sync.
+  `FastMCPProxy` rather than re-declaring tools. Nothing to hand-sync. The server is
+  built with `dereference_schemas=False`: FastMCP otherwise inlines every `$ref` and drops
+  `$defs` on listing, which keeps the accepted inputs but changes the schema's structure.
 - **Exactly one backend.** A backend config that defines more than one server is rejected
   (`client.py::_single_server_transport`) — a composite mount would prefix every tool name
   (`{server}_{tool}`) and break parity.
@@ -98,7 +100,7 @@ independently testable.
 | [`resilient.py`](src/mcp_call_orchestrator_proxy/resilient.py) | `ResilientBackend` — owns the one live connection and a background supervisor that keeps it healthy across backend restarts. Sits *below* the orchestrator, so it never adds concurrency. Sources `backend_status`. |
 | [`orchestrator.py`](src/mcp_call_orchestrator_proxy/orchestrator.py) | `CallOrchestrator` — MCP-agnostic queue. A single dispatcher pulls FIFO and runs each call as its own task, gated by a semaphore; each call is independently timed out so one hang can't wedge the queue. |
 | [`backend.py`](src/mcp_call_orchestrator_proxy/backend.py) | `QueuedMCPBackend` — thin facade that routes every `MCPBackendClient` operation through `orchestrator.submit(...)`. Its `__aenter__/__aexit__` are no-ops (the real connection is opened once by the lifespan, not per call). |
-| [`server.py`](src/mcp_call_orchestrator_proxy/server.py) | `build_proxy_server` — wraps the facade in `FastMCPProxy` directly (not `create_proxy()`) so the duck-typed facade is driven as-is with exact schemas. |
+| [`server.py`](src/mcp_call_orchestrator_proxy/server.py) | `build_proxy_server` — wraps the facade in `FastMCPProxy` directly (not `create_proxy()`) so the duck-typed facade is driven as-is with exact schemas, and turns off FastMCP's `$ref` inlining (`dereference_schemas=False`). |
 | [`app.py`](src/mcp_call_orchestrator_proxy/app.py) | Composition root. `create_proxy_app` wires settings → resilient → orchestrator → queued facade → proxy server, defines the lifespan, and registers the proxy-native `backend_status` tool. |
 
 ## Request lifecycle (a tool call)

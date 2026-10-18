@@ -38,10 +38,11 @@ described by `backend.json`.
 
 ## Component backends
 
-**In-process mocks** (`EchoBackend`, `GatedEchoBackend`, `ConcurrencyObserver`) — objects
-satisfying the `MCPBackendClient` Protocol, injected via `create_proxy_app`'s `backend_client`
-/ `backend_factory` parameters. Fast, and can produce states a healthy server will not (a
-connection that always fails). They implement no protocol and cross no transport.
+**In-process mocks** (`EchoBackend`, `GatedEchoBackend`, `ConcurrencyObserver`,
+`RefSchemaBackend`) — objects satisfying the `MCPBackendClient` Protocol, injected via
+`create_proxy_app`'s `backend_client` / `backend_factory` parameters. Fast, and can produce
+states a healthy server will not (a connection that always fails) or schemas exactly as a test
+needs them. They implement no protocol and cross no transport.
 
 **Spawned real MCP server** (`tests/support/probe_backend_server.py` via `spawn_backend`) —
 FastMCP's server implementation with test-specific tools, run as a child process on a fixed

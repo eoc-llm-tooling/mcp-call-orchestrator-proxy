@@ -40,6 +40,9 @@ def build_proxy_server(
         # proxy-native backend_status tool discoverable while the backend is
         # absent ("stay connectable, degrade").
         provider_error_strategy="warn",
+        # FastMCP inlines `$ref`/`$defs` by default; schemas pass through as the
+        # backend wrote them, so their structure stays the backend's own.
+        dereference_schemas=False,
         name=server_name,
         lifespan=lifespan,
     )
