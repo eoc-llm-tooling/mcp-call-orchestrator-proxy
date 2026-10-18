@@ -41,10 +41,14 @@ code or the shipped artifacts may presume a particular backend product.
 One process, one backend connection, one queue. Every backend-facing call flows:
 
 ```
-client → FastMCPProxy (server.py) → QueuedMCPBackend (backend.py)
-       → CallOrchestrator (orchestrator.py) → ResilientBackend (resilient.py)
-       → real fastmcp.Client (client.py) → backend MCP server
+client → FastMCPProxy (server.py) → ExposureAuditBackend (exposure_audit.py)
+       → QueuedMCPBackend (backend.py) → CallOrchestrator (orchestrator.py)
+       → ResilientBackend (resilient.py) → real fastmcp.Client (client.py) → backend MCP server
 ```
+
+Exposure control is two modules: `exposure.py` resolves the allow/deny settings and enforces
+them as FastMCP visibility on the server; `exposure_audit.py` is the pass-through layer above
+the queue that warns about filter names the backend does not have.
 
 `app.py::create_proxy_app` is the composition root that wires all of it and owns the
 lifespan. Every layer speaks the `MCPBackendClient` Protocol (`interfaces.py`), which is why
@@ -97,6 +101,9 @@ it before adding a test rather than copying the nearest existing one.
   comment in `server.py`.
 - **`initialize()` never raises when the backend is down** ("stay connectable, degrade") — clients
   must always be able to handshake with the proxy. Don't "fix" this into raising.
+- **`WARNING` is for outages, recoveries and what only the operator can fix** (a misconfigured
+  exposure filter, a call the backend never answered). Log a degradation the proxy absorbs by
+  design below `WARNING`.
 - **Break detection is network-silent** — no timed pings against the backend. Don't add a health-check ping.
 - **Stdio backends force `keep_alive=False`** unconditionally in `client.py::_single_server_transport`,
   regardless of what the config JSON says. Don't "simplify" that away — it's what stops a stdio
