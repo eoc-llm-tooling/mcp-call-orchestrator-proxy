@@ -1,6 +1,6 @@
 [project]
 name = "mcp-call-orchestrator-proxy"
-version = "0.4.2"
+version = "0.4.3"
 description = "Resilient, serializing MCP proxy in front of a single backend MCP server. Provides stable multi-client MCP access with session management and call orchestration/queuing (e.g. for mcp servers struggling on concurrency)."
 readme = "README.md"
 
