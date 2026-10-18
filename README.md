@@ -1,7 +1,7 @@
 # mcp-call-orchestrator-proxy
 
-A resilient, session-terminating, call-serializing **MCP proxy** that sits in
-front of a single backend MCP server and makes it safe for multiple concurrent
+A resilient, call-serializing **MCP proxy** that sits in front of a single
+backend MCP server as its only client and makes it safe for multiple concurrent
 clients.
 
 Some MCP servers have session-routing bugs or no call serialization, so two
