@@ -25,23 +25,16 @@ def pypi_fetches(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
 
     monkeypatch.setattr(version_check, "_fetch_latest_version", _fetch)
     monkeypatch.setattr(version_check, "_read_cache", lambda *_args: (None, 0.0))
-    monkeypatch.setattr(fastmcp.settings, "check_for_updates", "stable")
     return fetches
 
 
-def test_fastmcp_asks_pypi_when_its_update_check_is_on(
-    pypi_fetches: list[bool],
-) -> None:
-    """Control: the recorder sees the check FastMCP's startup banner runs."""
-    version_check.check_for_newer_version()
-    assert pypi_fetches == [False]
+def _fresh_fastmcp_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FastMCP's settings as a new process reads them from the environment."""
+    monkeypatch.setattr(fastmcp, "settings", type(fastmcp.settings)())
 
 
-def test_run_turns_off_fastmcps_update_check(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pypi_fetches: list[bool]
-) -> None:
-    """The banner FastMCP prints when a server starts would otherwise ask pypi.org
-    for a newer release; the proxy makes no outbound call of its own."""
+def _run_proxy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run `run` up to the point where FastMCP starts serving and shows its banner."""
     config = tmp_path / "backend.json"
     config.write_text('{"mcpServers": {"b": {"url": "http://127.0.0.1:1/mcp/"}}}')
 
@@ -54,11 +47,45 @@ def test_run_turns_off_fastmcps_update_check(
         "create_proxy_app",
         lambda settings: SimpleNamespace(mcp=SimpleNamespace(run=_run)),
     )
-
     result = CliRunner().invoke(
         cli.app, ["run", "--transport", "stdio", "--backend-config", str(config)]
     )
-
     assert result.exit_code == 0, result.output
+
+
+def test_fastmcp_asks_pypi_when_its_update_check_is_on(
+    monkeypatch: pytest.MonkeyPatch, pypi_fetches: list[bool]
+) -> None:
+    """Control: the recorder sees the check FastMCP's startup banner runs."""
+    monkeypatch.delenv("FASTMCP_CHECK_FOR_UPDATES", raising=False)
+    _fresh_fastmcp_settings(monkeypatch)
+
+    version_check.check_for_newer_version()
+
+    assert pypi_fetches == [False]
+
+
+def test_run_turns_off_fastmcps_update_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pypi_fetches: list[bool]
+) -> None:
+    """The banner FastMCP prints when a server starts would otherwise ask pypi.org
+    for a newer release; the proxy makes no outbound call of its own."""
+    monkeypatch.delenv("FASTMCP_CHECK_FOR_UPDATES", raising=False)
+    _fresh_fastmcp_settings(monkeypatch)
+
+    _run_proxy(tmp_path, monkeypatch)
+
     assert fastmcp.settings.check_for_updates == "off"
     assert pypi_fetches == []
+
+
+def test_run_keeps_an_update_check_the_operator_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pypi_fetches: list[bool]
+) -> None:
+    monkeypatch.setenv("FASTMCP_CHECK_FOR_UPDATES", "prerelease")
+    _fresh_fastmcp_settings(monkeypatch)
+
+    _run_proxy(tmp_path, monkeypatch)
+
+    assert fastmcp.settings.check_for_updates == "prerelease"
+    assert pypi_fetches == [True]

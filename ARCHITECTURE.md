@@ -314,7 +314,8 @@ going to be emitted.
 The proxy opens no outbound connection except to its backend. FastMCP asks pypi.org for a
 newer release of itself when a server starts; `cli.py` turns that check off
 (`fastmcp.settings.check_for_updates = "off"`) at the process entry point, which owns
-library-wide settings as it owns the logging configuration.
+library-wide settings as it owns the logging configuration. An operator who sets
+`FASTMCP_CHECK_FOR_UPDATES` keeps their own choice.
 
 ## Exposure control
 

@@ -54,9 +54,11 @@ def _disable_update_check() -> None:
 
     FastMCP runs that check with its startup banner. The proxy is a local
     service, so it makes no outbound call of its own; the process entry point
-    owns this library-wide setting, as it owns the logging configuration.
+    owns this library-wide setting, as it owns the logging configuration. An
+    operator who sets `FASTMCP_CHECK_FOR_UPDATES` keeps their choice.
     """
-    fastmcp.settings.check_for_updates = "off"
+    if "check_for_updates" not in fastmcp.settings.model_fields_set:
+        fastmcp.settings.check_for_updates = "off"
 
 
 @app.command()
