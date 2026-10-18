@@ -21,7 +21,9 @@ nothing here is a scheduled commitment, and the order changes when a real need d
   `cwd` in the `mcpServers` config) gets the same serialization, session termination, schema
   parity and resilience as an HTTP backend. The proxy owns that subprocess's whole life: starts
   it on connect, keeps it across reconnects, and kills it on break or shutdown — no orphaned
-  child left behind.
+  child left behind. An entry with FastMCP's transform keys (`tools`, `include_tags`,
+  `exclude_tags`), which would put a nested proxy in front of the subprocess, is refused at
+  startup.
 - **Exposure control** — exact-name allow-list or deny-list per surface (tools, resources
   including templates, prompts). Hidden items are absent from listings and uncallable.
   Allow beats deny when both are set for a surface; `backend_status` is filtered like any

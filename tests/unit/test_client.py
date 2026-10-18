@@ -4,17 +4,36 @@ No network I/O: verifies `build_real_backend_client()` wires settings
 onto the resulting `Client`'s transport correctly. Constructing a
 `StdioTransport` does not spawn a subprocess either - only `.connect()` does -
 so the keep_alive tests below stay offline like the rest of this tier.
+
+Also verifies that a backend entry carrying a FastMCP transform key stops the
+proxy at startup, and that the transport is built from the plain entry type
+regardless.
 """
 
 import json
 from pathlib import Path
+from typing import Any
 
+import pytest
 from fastmcp.client.auth.bearer import BearerAuth
 from fastmcp.client.transports import StdioTransport
 from fastmcp.client.transports.http import StreamableHttpTransport
 
+from mcp_call_orchestrator_proxy.app import create_proxy_app
 from mcp_call_orchestrator_proxy.client import build_real_backend_client
 from mcp_call_orchestrator_proxy.config import ProxySettings
+
+TRANSFORM_KEYS: list[tuple[str, Any]] = [
+    ("tools", {"echo": {"description": "d"}}),
+    ("include_tags", ["a"]),
+    ("exclude_tags", ["a"]),
+]
+
+
+def _write_config(tmp_path: Path, entry: dict[str, Any]) -> str:
+    config_path = tmp_path / "backend.json"
+    config_path.write_text(json.dumps({"mcpServers": {"probe": entry}}))
+    return str(config_path)
 
 
 def test_build_real_backend_client_wires_settings() -> None:
@@ -73,3 +92,64 @@ def test_stdio_backend_keep_alive_true_in_config_is_overridden(tmp_path: Path) -
 
     assert isinstance(client.transport, StdioTransport)
     assert client.transport.keep_alive is False
+
+
+@pytest.mark.parametrize(("key", "value"), TRANSFORM_KEYS)
+def test_stdio_entry_with_a_transform_key_still_gets_keep_alive_off(
+    tmp_path: Path, key: str, value: Any
+) -> None:
+    """The transport is built from the plain entry type, so a transform key can
+    never put a nested proxy between the override and the real transport."""
+    config = _write_config(tmp_path, {"command": "some-mcp-server", key: value})
+
+    client = build_real_backend_client(ProxySettings(backend_config=config))
+
+    assert isinstance(client.transport, StdioTransport)
+    assert client.transport.keep_alive is False
+
+
+@pytest.mark.parametrize(("key", "value"), TRANSFORM_KEYS)
+def test_http_entry_with_a_transform_key_still_gets_the_tls_setting(
+    tmp_path: Path, key: str, value: Any
+) -> None:
+    config = _write_config(
+        tmp_path, {"url": "https://127.0.0.1:27124/mcp/", key: value}
+    )
+
+    client = build_real_backend_client(
+        ProxySettings(backend_config=config, backend_verify_tls=True)
+    )
+
+    assert isinstance(client.transport, StreamableHttpTransport)
+    assert client.transport.verify is True
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [*TRANSFORM_KEYS, ("tools", {}), ("include_tags", None)],
+)
+def test_a_transform_key_in_the_entry_stops_the_proxy_at_startup(
+    tmp_path: Path, key: str, value: Any
+) -> None:
+    """Refused whatever its value - including one FastMCP itself reads as
+    absent - with an error naming the key."""
+    config = _write_config(tmp_path, {"command": "some-mcp-server", key: value})
+
+    with pytest.raises(ValueError, match=f"'probe' sets '{key}'"):
+        create_proxy_app(settings=ProxySettings(backend_config=config))
+
+
+def test_every_transform_key_present_is_named(tmp_path: Path) -> None:
+    config = _write_config(
+        tmp_path,
+        {"command": "some-mcp-server", "tools": {"echo": {}}, "exclude_tags": ["a"]},
+    )
+
+    with pytest.raises(ValueError, match="sets 'tools', 'exclude_tags'"):
+        create_proxy_app(settings=ProxySettings(backend_config=config))
+
+
+def test_a_plain_entry_starts_the_proxy(tmp_path: Path) -> None:
+    config = _write_config(tmp_path, {"command": "some-mcp-server"})
+
+    create_proxy_app(settings=ProxySettings(backend_config=config))

@@ -89,6 +89,10 @@ part of the `mcpServers` format, so it stays a separate knob
 (`MCP_PROXY_BACKEND_VERIFY_TLS`, default `false`). An example lives at
 [`deploy/systemd/backend.example.json`](deploy/systemd/backend.example.json).
 
+FastMCP's own extensions to the entry — `tools`, `include_tags` and
+`exclude_tags` — are not supported: an entry that sets any of them stops the
+proxy at startup with an error naming the key.
+
 The backend can just as well be a **stdio server** — most of the MCP ecosystem
 ships this way — described the same way any MCP client would describe it:
 command, arguments, and (optionally) environment and working directory:

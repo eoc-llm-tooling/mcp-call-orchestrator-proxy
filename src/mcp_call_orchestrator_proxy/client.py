@@ -12,6 +12,11 @@ Two backend sources are supported (see `ProxySettings`):
   verification is applied on top from `backend_verify_tls`, since the standard
   format has no verify field.
 - The individual `backend_mcp_url` + `backend_api_key` fields (fallback).
+
+FastMCP's transform keys (`tools`, `include_tags`, `exclude_tags`) are refused at
+startup (`check_backend_config`): FastMCP applies them through a nested
+in-process proxy around the real transport, out of reach of the `keep_alive`
+and TLS settings this module applies.
 """
 
 from __future__ import annotations
@@ -26,9 +31,11 @@ from fastmcp.client.transports import (
     StdioTransport,
     StreamableHttpTransport,
 )
-from fastmcp.mcp_config import MCPConfig
+from fastmcp.mcp_config import MCPConfig, RemoteMCPServer, StdioMCPServer
 
 from mcp_call_orchestrator_proxy.config import ProxySettings
+
+_UNSUPPORTED_ENTRY_KEYS = ("tools", "include_tags", "exclude_tags")
 
 
 def build_real_backend_client(settings: ProxySettings) -> Client[Any]:
@@ -74,7 +81,14 @@ def _single_server_transport(config_path: str) -> ClientTransport:
             f"(this proxy fronts a single backend); found {len(servers)}: "
             f"{sorted(servers)}."
         )
-    transport = next(iter(servers.values())).to_transport()
+    server = next(iter(servers.values()))
+    # The plain type's `to_transport`, never a transforming subclass's override:
+    # that one returns a nested proxy, which the settings below cannot reach.
+    transport: ClientTransport
+    if isinstance(server, StdioMCPServer):
+        transport = StdioMCPServer.to_transport(server)
+    else:
+        transport = RemoteMCPServer.to_transport(server)
     if isinstance(transport, StdioTransport):
         # `keep_alive=True` (fastmcp's default) is for reusing one subprocess
         # across several separate `async with client:` blocks in a long-lived
@@ -88,6 +102,30 @@ def _single_server_transport(config_path: str) -> ClientTransport:
         # reconnect or a shutdown.
         transport.keep_alive = False
     return transport
+
+
+def check_backend_config(settings: ProxySettings) -> None:
+    """Refuse a backend config entry that carries a FastMCP transform key.
+
+    Called once at startup, so the proxy does not start on a config whose keys
+    it would not apply. A key is refused whatever its value: FastMCP reads an
+    empty one as absent, but the operator still wrote it.
+    """
+    if not settings.backend_config:
+        return
+    config = MCPConfig.from_file(Path(settings.backend_config))
+    for name, server in config.mcpServers.items():
+        given = server.model_fields_set | set(server.model_extra or {})
+        refused = [key for key in _UNSUPPORTED_ENTRY_KEYS if key in given]
+        if refused:
+            keys = ", ".join(repr(key) for key in refused)
+            them = "it" if len(refused) == 1 else "them"
+            raise ValueError(
+                f"Backend config {settings.backend_config!r}: server {name!r} sets "
+                f"{keys}, which this proxy does not apply: FastMCP implements "
+                f"{them} with a nested proxy that bypasses this proxy's transport "
+                f"settings. Remove {them} from the entry."
+            )
 
 
 def resolve_backend_url(settings: ProxySettings) -> str:
