@@ -50,7 +50,9 @@ These are load-bearing; changing any of them changes the product.
   without an explicit close. Left at the default, that leaks the subprocess until Python
   happens to garbage-collect it. `client.py::_single_server_transport` forces
   `keep_alive=False` unconditionally — regardless of what a config's own `keep_alive` field
-  says — so don't special-case or revert that override.
+  says — so don't special-case or revert that override. It builds the transport with the
+  plain entry type's `to_transport()`, so the override always reaches the real
+  `StdioTransport`.
 - **Severity carries meaning.** A record's level alone says whether the operator is needed:
   `WARNING`+ is reserved for the backend going away and coming back, `INFO` shows the queue
   working, `DEBUG` is for fault-finding. A degradation the proxy absorbs by design must never
@@ -95,7 +97,7 @@ independently testable.
 |---|---|
 | [`cli.py`](src/mcp_call_orchestrator_proxy/cli.py) | Typer CLI (`run` subcommand). Maps flags to setting overrides, then runs the app over stdio or Streamable HTTP. CLI flags win over env vars. |
 | [`config.py`](src/mcp_call_orchestrator_proxy/config.py) | `ProxySettings` (pydantic-settings, `MCP_PROXY_` prefix). Validates that a backend source is configured. |
-| [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant; forces `keep_alive=False` on a stdio transport; resolves a human-readable backend URL. |
+| [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant; refuses FastMCP's transform keys at startup; forces `keep_alive=False` on a stdio transport; resolves a human-readable backend URL. |
 | [`interfaces.py`](src/mcp_call_orchestrator_proxy/interfaces.py) | `MCPBackendClient` Protocol — the structural contract every layer implements. |
 | [`resilient.py`](src/mcp_call_orchestrator_proxy/resilient.py) | `ResilientBackend` — owns the one live connection and a background supervisor that keeps it healthy across backend restarts. Sits *below* the orchestrator, so it never adds concurrency. Sources `backend_status`. |
 | [`orchestrator.py`](src/mcp_call_orchestrator_proxy/orchestrator.py) | `CallOrchestrator` — MCP-agnostic queue. A single dispatcher pulls FIFO and runs each call as its own task, gated by a semaphore; each call is independently timed out so one hang can't wedge the queue. |
@@ -206,6 +208,14 @@ backend sources (see [`README.md`](README.md) for the full variable table):
   (`command`/`args`/`env`/`cwd`) transparently — FastMCP resolves either to its transport, no
   branching needed in this proxy beyond the `keep_alive` override above and the TLS `verify`
   kwarg only applying to HTTP/SSE. Wins when set.
+
+  FastMCP's transform keys (`tools`, `include_tags`, `exclude_tags`) are refused at startup
+  (`client.py::check_backend_config`, called by `create_proxy_app`), whatever their value, with
+  an error naming the key. FastMCP parses an entry that carries one as a *transforming* server,
+  whose own `to_transport()` returns a `FastMCPTransport` around a nested in-process proxy of
+  the real transport: the `keep_alive` override and the TLS setting would not reach the real
+  transport, and the transforms could change tool names and schemas. The transport is built
+  from the plain entry type (`StdioMCPServer` / `RemoteMCPServer`) in any case.
 - **Individual fields** (`backend_mcp_url` + `backend_api_key`) — the fallback, HTTP only; the
   API key is required in this mode.
 

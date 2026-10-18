@@ -20,6 +20,7 @@ from fastmcp import FastMCP
 from mcp_call_orchestrator_proxy.backend import QueuedMCPBackend
 from mcp_call_orchestrator_proxy.client import (
     build_real_backend_client,
+    check_backend_config,
     resolve_backend_url,
 )
 from mcp_call_orchestrator_proxy.config import ProxySettings, get_settings
@@ -54,7 +55,10 @@ def create_proxy_app(
     backend_client: MCPBackendClient | None = None,
     backend_factory: Callable[[], MCPBackendClient] | None = None,
 ) -> ProxyApp:
-    """Build a fully wired proxy application. Performs no I/O.
+    """Build a fully wired proxy application. Performs no network I/O.
+
+    Reads the backend config file, when one is set, and raises ``ValueError``
+    if its entry carries a key this proxy does not apply (`check_backend_config`).
 
     The real backend connection is wrapped in a `ResilientBackend` so the
     proxy survives the backend being absent at startup and coming and going
@@ -68,6 +72,7 @@ def create_proxy_app(
     - otherwise: a fresh real `fastmcp.Client` per attempt, built from `settings`.
     """
     settings = settings or get_settings()
+    check_backend_config(settings)
 
     resolved_factory: Callable[[], MCPBackendClient]
     if backend_factory is not None:
