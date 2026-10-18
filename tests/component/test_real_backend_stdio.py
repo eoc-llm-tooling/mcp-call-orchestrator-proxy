@@ -93,6 +93,7 @@ async def test_proxy_fronts_a_real_stdio_backend_with_exact_schema_parity(
         assert tools == {
             "echo",
             "header_echo",
+            "mismatched_output",
             "slow_echo",
             "hang",
             "call_stats",

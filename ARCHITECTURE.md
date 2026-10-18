@@ -111,7 +111,7 @@ the Protocol with what a connected client negotiated (capabilities, instructions
 |---|---|
 | [`cli.py`](src/mcp_call_orchestrator_proxy/cli.py) | Typer CLI (`run` subcommand). Maps flags to setting overrides, configures logging, turns off FastMCP's update check, then runs the app over stdio or Streamable HTTP. CLI flags win over env vars. |
 | [`config.py`](src/mcp_call_orchestrator_proxy/config.py) | `ProxySettings` (pydantic-settings, `MCP_PROXY_` prefix). Validates that a backend source is configured. |
-| [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant and refuses FastMCP's transform keys, both at startup; forces `keep_alive=False` on a stdio transport; gives a streamable-HTTP backend's client a read timeout longer than the call timeout; resolves a human-readable backend URL. |
+| [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant and refuses FastMCP's transform keys, both at startup; forces `keep_alive=False` on a stdio transport; gives the client a session that relays tool results without checking them against their output schema (`RelayClientSession`); gives a streamable-HTTP backend's client a read timeout longer than the call timeout; resolves a human-readable backend URL. |
 | [`interfaces.py`](src/mcp_call_orchestrator_proxy/interfaces.py) | `MCPBackendClient` Protocol — the structural contract every layer implements — and `NegotiatedBackendClient`, which adds what a connected client negotiated. |
 | [`resilient.py`](src/mcp_call_orchestrator_proxy/resilient.py) | `ResilientBackend` — owns the one live connection and a background supervisor that keeps it healthy across backend restarts. Sits *below* the orchestrator, so it never adds concurrency. Records what the backend negotiated (`BackendMetadata`) on each connect. Sources `backend_status`. |
 | [`orchestrator.py`](src/mcp_call_orchestrator_proxy/orchestrator.py) | `CallOrchestrator` — MCP-agnostic queue. A single dispatcher pulls FIFO and runs each call as its own task, gated by a semaphore; each call is independently timed out so one hang can't wedge the queue. |
@@ -136,7 +136,8 @@ the Protocol with what a connected client negotiated (capabilities, instructions
 4. The dispatcher pulls the call FIFO, acquires a concurrency slot (semaphore), and runs it
    as its own task under `call_timeout_seconds`.
 5. The call reaches `ResilientBackend`, which delegates to the live `fastmcp.Client`. A
-   successful `CallToolResult` (including `isError=True` *tool* failures) flows back up. A
+   successful `CallToolResult` (including `isError=True` *tool* failures) flows back up as the
+   backend sent it, whether or not it matches the tool's declared output schema. A
    *connection* error instead marks the connection broken and raises
    `BackendUnavailableError`, which FastMCP maps to a clean MCP error for the client.
 6. The result resolves the future; the slot is released; the next queued call proceeds.
@@ -173,10 +174,15 @@ the Protocol with what a connected client negotiated (capabilities, instructions
 
   These are broken-connection signals, not failed calls; an ordinary tool error
   (`CallToolResult(isError=True)`) or any other `MCPError` is a per-call failure and leaves
-  the connection live. The match is scoped to these exact signals precisely because an
-  unknown, failed or timed-out tool call also raises `MCPError` (a timeout with the same
-  `-32001` code), and treating the whole class as a break would tear the connection down on an
-  ordinary error.
+  the connection live. `RuntimeError` is in `_CONNECTION_ERRORS` because FastMCP raises it for
+  a client that is not connected; the MCP SDK's `ClientSession` also raises it for a tool
+  result whose structured content does not match the tool's declared output schema. The
+  backend client's session (`client.py::RelayClientSession`) skips that check: the proxy
+  relays results, its clients check them against the same schema, and a backend's schema bug
+  is then neither a break nor a failed call. The match is scoped to these exact signals
+  precisely because an unknown, failed or timed-out tool call also raises `MCPError` (a timeout
+  with the same `-32001` code), and treating the whole class as a break would tear the
+  connection down on an ordinary error.
 - **A timed-out call fails alone.** A call that outlasts `call_timeout_seconds` is cancelled
   by the queue (the MCP request timeout, of the same length, is the backstop), and the MCP SDK
   abandons that one request, aborting its HTTP request on a 2026-07-28 connection; the

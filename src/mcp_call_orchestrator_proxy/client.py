@@ -18,6 +18,10 @@ A config that does not define exactly one server, and FastMCP's transform keys
 (`check_backend_config`). FastMCP applies the transform keys through a nested
 in-process proxy around the real transport, out of reach of the `keep_alive`
 and TLS settings this module applies.
+
+The client relays tool results without checking them against the tool's
+declared output schema (`RelayClientSession`); the proxy's own clients check
+what they receive.
 """
 
 from __future__ import annotations
@@ -34,7 +38,10 @@ from fastmcp.client.transports import (
     StdioTransport,
     StreamableHttpTransport,
 )
+from fastmcp.client.transports.base import TransportOptions
 from fastmcp.mcp_config import MCPConfig, RemoteMCPServer, StdioMCPServer
+from mcp import types as mcp_types
+from mcp.client.session import ClientSession
 
 from mcp_call_orchestrator_proxy.config import ProxySettings
 
@@ -44,6 +51,25 @@ _UNSUPPORTED_ENTRY_KEYS = ("tools", "include_tags", "exclude_tags")
 _HTTP_READ_GRACE_SECONDS = 5.0
 
 
+class RelayClientSession(ClientSession):
+    """A backend session that returns tool results as the backend sent them.
+
+    `ClientSession` checks a tool's structured content against the tool's
+    declared output schema and raises `RuntimeError` on a mismatch - the same
+    type FastMCP raises for a client that is not connected, which
+    `ResilientBackend` treats as a broken connection. The proxy relays results
+    rather than consuming them, and each of its clients runs the check itself.
+    """
+
+    async def validate_tool_result(
+        self, name: str, result: mcp_types.CallToolResult
+    ) -> None:
+        return None
+
+
+_RELAY_OPTIONS = TransportOptions(session_class=RelayClientSession)
+
+
 def build_real_backend_client(settings: ProxySettings) -> Client[Any]:
     """Build a fastmcp Client for the configured backend.
 
@@ -51,7 +77,8 @@ def build_real_backend_client(settings: ProxySettings) -> Client[Any]:
     `verify=False` disables TLS verification for a self-signed cert.
     `init_timeout` bounds a single connect/initialize attempt so the resilient
     supervisor's retry loop stays responsive when the backend is slow or absent.
-    `timeout` bounds each call; a call that exceeds it fails alone.
+    `timeout` bounds each call; a call that exceeds it fails alone. Tool
+    results are not checked against their output schema (`RelayClientSession`).
     """
     client: Client[Any]
     if settings.backend_config:
@@ -77,6 +104,9 @@ def build_real_backend_client(settings: ProxySettings) -> Client[Any]:
             verify=settings.backend_verify_tls,
             read_timeout=settings.call_timeout_seconds + _HTTP_READ_GRACE_SECONDS,
         )
+    # `Client` takes its session class only from these options, and has no
+    # constructor argument for them; FastMCP's own `ProxyClient` sets them so.
+    client._transport_options = _RELAY_OPTIONS
     return client
 
 
