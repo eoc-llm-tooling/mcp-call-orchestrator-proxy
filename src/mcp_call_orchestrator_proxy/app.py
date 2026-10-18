@@ -58,7 +58,8 @@ def create_proxy_app(
     """Build a fully wired proxy application. Performs no network I/O.
 
     Reads the backend config file, when one is set, and raises ``ValueError``
-    if its entry carries a key this proxy does not apply (`check_backend_config`).
+    if it does not define exactly one server or its entry carries a key this
+    proxy does not apply (`check_backend_config`).
 
     The real backend connection is wrapped in a `ResilientBackend` so the
     proxy survives the backend being absent at startup and coming and going

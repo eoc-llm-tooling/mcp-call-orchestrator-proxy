@@ -153,3 +153,25 @@ def test_a_plain_entry_starts_the_proxy(tmp_path: Path) -> None:
     config = _write_config(tmp_path, {"command": "some-mcp-server"})
 
     create_proxy_app(settings=ProxySettings(backend_config=config))
+
+
+@pytest.mark.parametrize(
+    "servers",
+    [
+        {
+            "a": {"command": "some-mcp-server"},
+            "b": {"url": "https://127.0.0.1:27124/mcp/"},
+        },
+        {},
+    ],
+)
+def test_a_config_without_exactly_one_server_stops_the_proxy_at_startup(
+    tmp_path: Path, servers: dict[str, Any]
+) -> None:
+    """Refused by ``create_proxy_app``, before any connection is attempted - not
+    left to the backend factory, whose error the supervisor would retry."""
+    config_path = tmp_path / "backend.json"
+    config_path.write_text(json.dumps({"mcpServers": servers}))
+
+    with pytest.raises(ValueError, match=f"found {len(servers)}"):
+        create_proxy_app(settings=ProxySettings(backend_config=str(config_path)))

@@ -26,9 +26,10 @@ These are load-bearing; changing any of them changes the product.
   `FastMCPProxy` rather than re-declaring tools. Nothing to hand-sync. The server is
   built with `dereference_schemas=False`: FastMCP otherwise inlines every `$ref` and drops
   `$defs` on listing, which keeps the accepted inputs but changes the schema's structure.
-- **Exactly one backend.** A backend config that defines more than one server is rejected
-  (`client.py::_single_server_transport`) — a composite mount would prefix every tool name
-  (`{server}_{tool}`) and break parity.
+- **Exactly one backend.** A backend config that does not define exactly one server is
+  refused at startup (`client.py::check_backend_config`, called by `create_proxy_app`) — a
+  composite mount would prefix every tool name (`{server}_{tool}`) and break parity.
+  `client.py::_single_server_transport` applies the same check on each connect.
 - **Serialize by default.** `max_concurrent_calls` defaults to `1`. This is the whole
   reason the project exists; raising it is opt-in.
 - **Stay connectable, degrade.** The proxy must start and remain connectable regardless of
@@ -97,7 +98,7 @@ independently testable.
 |---|---|
 | [`cli.py`](src/mcp_call_orchestrator_proxy/cli.py) | Typer CLI (`run` subcommand). Maps flags to setting overrides, then runs the app over stdio or Streamable HTTP. CLI flags win over env vars. |
 | [`config.py`](src/mcp_call_orchestrator_proxy/config.py) | `ProxySettings` (pydantic-settings, `MCP_PROXY_` prefix). Validates that a backend source is configured. |
-| [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant; refuses FastMCP's transform keys at startup; forces `keep_alive=False` on a stdio transport; resolves a human-readable backend URL. |
+| [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant and refuses FastMCP's transform keys, both at startup; forces `keep_alive=False` on a stdio transport; resolves a human-readable backend URL. |
 | [`interfaces.py`](src/mcp_call_orchestrator_proxy/interfaces.py) | `MCPBackendClient` Protocol — the structural contract every layer implements. |
 | [`resilient.py`](src/mcp_call_orchestrator_proxy/resilient.py) | `ResilientBackend` — owns the one live connection and a background supervisor that keeps it healthy across backend restarts. Sits *below* the orchestrator, so it never adds concurrency. Sources `backend_status`. |
 | [`orchestrator.py`](src/mcp_call_orchestrator_proxy/orchestrator.py) | `CallOrchestrator` — MCP-agnostic queue. A single dispatcher pulls FIFO and runs each call as its own task, gated by a semaphore; each call is independently timed out so one hang can't wedge the queue. |
