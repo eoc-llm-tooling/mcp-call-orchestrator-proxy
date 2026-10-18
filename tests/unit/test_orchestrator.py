@@ -11,7 +11,9 @@ Verifies:
 """
 
 import asyncio
+import contextlib
 import logging
+from typing import Any
 
 import pytest
 
@@ -114,6 +116,121 @@ async def test_hung_call_does_not_wedge_the_queue() -> None:
         assert await orch.submit(quick) == "ok"
     finally:
         await orch.stop()
+
+
+# --- The per-call timeout: the wait in the queue and the backend call ---
+
+QUEUE_TIMEOUT_TEXT = "Timed out after 0.3s waiting in the queue for the backend"
+BACKEND_TIMEOUT_TEXT = "Backend call timed out after 0.3s"
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_says_what_timed_out_and_after_how_long() -> None:
+    """The backend call and the wait in the queue each fail with their own text."""
+    started: list[str] = []
+
+    def call(name: str) -> Any:
+        async def fn() -> None:
+            started.append(name)
+            await asyncio.sleep(10)
+
+        return fn
+
+    async with CallOrchestrator(call_timeout=0.3) as orch:
+        hung = asyncio.create_task(orch.submit(call("hung")))
+        await asyncio.sleep(0.05)
+        behind = asyncio.create_task(orch.submit(call("behind")))
+        await asyncio.sleep(0.05)
+        with pytest.raises(TimeoutError) as queued:
+            await orch.submit(call("queued"))
+        with pytest.raises(TimeoutError) as backend:
+            await hung
+        with pytest.raises(TimeoutError):
+            await behind
+
+    assert str(queued.value) == QUEUE_TIMEOUT_TEXT
+    assert str(backend.value) == BACKEND_TIMEOUT_TEXT
+    assert started == ["hung", "behind"]
+
+
+@pytest.mark.asyncio
+async def test_a_call_whose_caller_timed_out_in_the_queue_never_runs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A call queued behind two hung ones times out in the queue, and is dropped
+    from it: the caller has its error, so the call must not run afterwards."""
+    caplog.set_level(logging.DEBUG, logger=ORCHESTRATOR_LOGGER)
+    ran: list[str] = []
+
+    async def hangs() -> None:
+        ran.append("hang")
+        await asyncio.sleep(10)
+
+    async def quick() -> str:
+        ran.append("quick")
+        return "ok"
+
+    async with CallOrchestrator(call_timeout=0.3) as orch:
+        first = asyncio.create_task(orch.submit(hangs, label="hang"))
+        await asyncio.sleep(0.05)
+        second = asyncio.create_task(orch.submit(hangs, label="hang"))
+        await asyncio.sleep(0.05)
+        with pytest.raises(TimeoutError, match="waiting in the queue"):
+            await orch.submit(quick, label="quick")
+        for task in (first, second):
+            with pytest.raises(TimeoutError, match="Backend call timed out"):
+                await task
+        await asyncio.sleep(0.1)
+
+    assert ran == ["hang", "hang"]
+    assert not messages(caplog, "call completed")
+
+
+@pytest.mark.asyncio
+async def test_a_call_whose_caller_is_cancelled_before_it_starts_never_runs() -> None:
+    ran: list[str] = []
+    release = asyncio.Event()
+
+    async def holds() -> None:
+        await release.wait()
+
+    async def quick() -> str:
+        ran.append("quick")
+        return "ok"
+
+    async with CallOrchestrator() as orch:
+        holding = asyncio.create_task(orch.submit(holds))
+        await asyncio.sleep(0.05)
+        waiting = asyncio.create_task(orch.submit(quick))
+        await asyncio.sleep(0.05)
+        waiting.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await waiting
+        release.set()
+        await holding
+        assert await orch.submit(lambda: asyncio.sleep(0, "after")) == "after"
+
+    assert ran == []
+
+
+@pytest.mark.asyncio
+async def test_a_queued_call_gets_its_whole_timeout_once_it_starts() -> None:
+    """The wait behind a hung call does not use up the timeout of the call that
+    waited: it runs for up to the whole timeout from its own start."""
+
+    async def hangs() -> None:
+        await asyncio.sleep(10)
+
+    async def slow() -> str:
+        await asyncio.sleep(0.2)
+        return "done"
+
+    async with CallOrchestrator(call_timeout=0.3) as orch:
+        hung = asyncio.create_task(orch.submit(hangs))
+        await asyncio.sleep(0.15)
+        assert await orch.submit(slow) == "done"
+        with pytest.raises(TimeoutError):
+            await hung
 
 
 @pytest.mark.asyncio

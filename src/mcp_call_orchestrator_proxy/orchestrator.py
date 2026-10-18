@@ -35,6 +35,9 @@ class _QueuedCall[T]:
 
     fn: Callable[[], Awaitable[T]]
     future: asyncio.Future[T] = field(repr=False)
+    # Resolved by the dispatcher when the call starts; cancelled when its caller
+    # gives up first, which withdraws the call from the queue.
+    started: asyncio.Future[None] = field(repr=False)
     enqueued_at: float = field(default_factory=time.monotonic)
     client_label: str = _UNKNOWN_CLIENT
     op_label: str = "call"
@@ -46,8 +49,11 @@ class CallOrchestrator:
     A single dispatcher task pulls queued calls in FIFO order and starts
     each one as its own task, gated by a semaphore so at most
     `max_concurrent` calls actually run at once (1 = fully serialized).
-    Each call is independently subject to `call_timeout`, so a hung
-    backend call cannot wedge the queue for everyone else. All public
+    `call_timeout` bounds a call's wait in the queue and its run, each from
+    its own start, so a hung backend call cannot wedge the queue for
+    everyone else and a call that waited behind it still gets the whole
+    timeout to run. A call whose caller is gone before it starts - timed out
+    in the queue or cancelled - is dropped and never runs. All public
     methods are async and safe for concurrent use by multiple callers.
 
     `expected_errors` are the exception types that mean "a degradation the
@@ -125,12 +131,19 @@ class CallOrchestrator:
         `client` are recorded for log attribution, so an operator can read
         back which client caused which queued work, and in what order the
         queue served it. Neither affects scheduling.
+
+        Raises `TimeoutError` when the call waits in the queue, or runs, for
+        longer than `call_timeout`; its message says which, and for how long.
+        A call that times out in the queue, or whose caller is cancelled
+        while it waits, never runs.
         """
         loop = asyncio.get_running_loop()
         future: asyncio.Future[T] = loop.create_future()
+        started: asyncio.Future[None] = loop.create_future()
         queued: _QueuedCall[T] = _QueuedCall(
             fn=fn,
             future=future,
+            started=started,
             client_label=client or _UNKNOWN_CLIENT,
             op_label=label or "call",
         )
@@ -143,17 +156,34 @@ class CallOrchestrator:
             self._queue.qsize(),
         )
 
+        # `wait_for` cancels `started` on a timeout or when this caller is
+        # cancelled; unless the call has started by then, that withdraws it.
         try:
-            return await asyncio.wait_for(future, timeout=self._call_timeout)
+            await asyncio.wait_for(started, timeout=self._call_timeout)
         except TimeoutError:
-            if not future.done():
-                future.cancel()
-            logger.warning(
-                "orchestrator: call timed out waiting for a result (client=%s op=%s)",
-                queued.client_label,
-                queued.op_label,
-            )
+            if started.cancelled():
+                logger.warning(
+                    "orchestrator: call timed out after %.3fs waiting in the queue "
+                    "(client=%s op=%s) - withdrawn, it will not run",
+                    time.monotonic() - queued.enqueued_at,
+                    queued.client_label,
+                    queued.op_label,
+                )
+                raise TimeoutError(
+                    f"Timed out after {self._call_timeout:g}s waiting in the "
+                    "queue for the backend"
+                ) from None
+        except asyncio.CancelledError:
+            if started.cancelled():
+                logger.info(
+                    "orchestrator: call withdrawn by its caller before it started "
+                    "client=%s op=%s wait=%.3fs",
+                    queued.client_label,
+                    queued.op_label,
+                    time.monotonic() - queued.enqueued_at,
+                )
             raise
+        return await future
 
     async def _dispatch_loop(self) -> None:
         """Pull queued calls in order and start each as its own task."""
@@ -163,10 +193,27 @@ class CallOrchestrator:
             except TimeoutError:
                 continue
 
+            if queued.started.cancelled():
+                self._drop_withdrawn(queued)
+                continue
             await self._semaphore.acquire()
+            if queued.started.cancelled():
+                self._semaphore.release()
+                self._drop_withdrawn(queued)
+                continue
+            queued.started.set_result(None)
             task = asyncio.create_task(self._execute(queued), name="orchestrator-call")
             self._inflight.add(task)
             task.add_done_callback(self._on_call_done)
+
+    def _drop_withdrawn(self, queued: _QueuedCall[Any]) -> None:
+        """Discard a call whose caller gave up before it started."""
+        logger.debug(
+            "orchestrator: dropped a withdrawn call client=%s op=%s",
+            queued.client_label,
+            queued.op_label,
+        )
+        self._queue.task_done()
 
     def _on_call_done(self, task: asyncio.Task[None]) -> None:
         self._inflight.discard(task)
@@ -200,7 +247,11 @@ class CallOrchestrator:
                 queue_wait,
             )
             if not queued.future.done():
-                queued.future.set_exception(TimeoutError("Backend call timed out"))
+                queued.future.set_exception(
+                    TimeoutError(
+                        f"Backend call timed out after {self._call_timeout:g}s"
+                    )
+                )
         except self._expected_errors as exc:
             # A degradation the proxy is absorbing (the backend is down and the
             # supervisor is already reconnecting), not a fault. WARNING, and no
@@ -247,6 +298,10 @@ class CallOrchestrator:
             if not queued.future.done():
                 queued.future.set_result(result)
         finally:
+            # Cancelled by `stop()`: the caller, which waits on the future
+            # without a timeout of its own, must not wait forever.
+            if not queued.future.done():
+                queued.future.cancel()
             self._queue.task_done()
 
     async def __aenter__(self) -> CallOrchestrator:

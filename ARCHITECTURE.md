@@ -114,7 +114,7 @@ the Protocol with what a connected client negotiated (capabilities, instructions
 | [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant and refuses FastMCP's transform keys, both at startup; forces `keep_alive=False` on a stdio transport; gives the client a session that relays tool results without checking them against their output schema (`RelayClientSession`); gives a streamable-HTTP backend's client a read timeout longer than the call timeout; resolves a human-readable backend URL. |
 | [`interfaces.py`](src/mcp_call_orchestrator_proxy/interfaces.py) | `MCPBackendClient` Protocol — the structural contract every layer implements — and `NegotiatedBackendClient`, which adds what a connected client negotiated. |
 | [`resilient.py`](src/mcp_call_orchestrator_proxy/resilient.py) | `ResilientBackend` — owns the one live connection and a background supervisor that keeps it healthy across backend restarts. Sits *below* the orchestrator, so it never adds concurrency. Records what the backend negotiated (`BackendMetadata`) on each connect. Sources `backend_status`. |
-| [`orchestrator.py`](src/mcp_call_orchestrator_proxy/orchestrator.py) | `CallOrchestrator` — MCP-agnostic queue. A single dispatcher pulls FIFO and runs each call as its own task, gated by a semaphore; each call is independently timed out so one hang can't wedge the queue. |
+| [`orchestrator.py`](src/mcp_call_orchestrator_proxy/orchestrator.py) | `CallOrchestrator` — MCP-agnostic queue. A single dispatcher pulls FIFO and runs each call as its own task, gated by a semaphore. A call's wait in the queue and its run are each timed out from their own start, so one hang can't wedge the queue; a call whose caller is gone before it starts is dropped and never runs. |
 | [`backend.py`](src/mcp_call_orchestrator_proxy/backend.py) | `QueuedMCPBackend` — thin facade that routes every `MCPBackendClient` operation through `orchestrator.submit(...)`. Its `__aenter__/__aexit__` are no-ops (the real connection is opened once by the lifespan, not per call). |
 | [`exposure.py`](src/mcp_call_orchestrator_proxy/exposure.py) | Exposure control, policy side. `resolve_policies` turns the six allow/deny settings into one policy per surface (pure: no I/O, no logging) plus the startup warnings; `apply_exposure_policy` enforces it with FastMCP's scoped `disable`/`enable` visibility on the server. |
 | [`exposure_audit.py`](src/mcp_call_orchestrator_proxy/exposure_audit.py) | `ExposureAuditBackend` — exposure control, audit side. A pass-through `MCPBackendClient` layer above the queue that compares the configured filter names with the backend's first successful listing per surface and warns once per unknown name. Filters and refuses nothing. |
@@ -137,9 +137,15 @@ the Protocol with what a connected client negotiated (capabilities, instructions
    which passes it to the `QueuedMCPBackend` facade. Both context managers are no-ops — the
    real connection is already open.
 3. The facade wraps the call in a zero-arg coroutine and hands it to
-   `CallOrchestrator.submit(...)`. The caller awaits a future.
+   `CallOrchestrator.submit(...)`. The caller waits for the call to start, for up to
+   `call_timeout_seconds`, then for its result. A call that times out in the queue, or whose
+   caller is cancelled there, is withdrawn: the caller gets "Timed out after *N*s waiting in
+   the queue for the backend" (or its cancellation), and the dispatcher drops the call when it
+   reaches it, without running it.
 4. The dispatcher pulls the call FIFO, acquires a concurrency slot (semaphore), and runs it
-   as its own task under `call_timeout_seconds`.
+   as its own task under `call_timeout_seconds`, counted from that start: a call that waited
+   behind a slow one still has the whole timeout to run. One that outlasts it fails with
+   "Backend call timed out after *N*s".
 5. The call reaches `ResilientBackend`, which delegates to the live `fastmcp.Client`. A
    successful `CallToolResult` (including `isError=True` *tool* failures) flows back up as the
    backend sent it, whether or not it matches the tool's declared output schema. A
@@ -188,15 +194,15 @@ the Protocol with what a connected client negotiated (capabilities, instructions
   precisely because an unknown, failed or timed-out tool call also raises `MCPError` (a timeout
   with the same `-32001` code), and treating the whole class as a break would tear the
   connection down on an ordinary error.
-- **A timed-out call fails alone.** A call that outlasts `call_timeout_seconds` is cancelled
-  by the queue (the MCP request timeout, of the same length, is the backstop), and the MCP SDK
-  abandons that one request, aborting its HTTP request on a 2026-07-28 connection; the
-  connection stays live for the calls queued behind it. The backend's streamable-HTTP client
-  reads for `call_timeout_seconds` plus 5 s for this reason (`client.py::_http_client_factory`):
-  `fastmcp.Client` would otherwise set the HTTP read timeout to the call timeout as well, and
-  when that fires first on a 2026-07-28 connection, whose answers are not streamed, the MCP
-  SDK's transport fails as a whole and ends the connection. A timeout is a per-call failure,
-  not a break.
+- **A timed-out call fails alone.** A call that runs for longer than `call_timeout_seconds`
+  is cancelled by the queue, and the MCP SDK abandons that one request, aborting its HTTP
+  request on a 2026-07-28 connection; the connection stays live for the calls queued behind
+  it. The backend client's own MCP request timeout and its streamable-HTTP read timeout are
+  `call_timeout_seconds` plus 5 s (`client.py`, `_BACKSTOP_GRACE_SECONDS`), so the queue's
+  timeout is the one that fires. A request timeout of equal length could fire first and fail
+  the call with an `MCPError` that names no duration. A read timeout that fires first on a
+  2026-07-28 connection, whose answers are not streamed, makes the MCP SDK's transport fail as
+  a whole and end the connection. A timeout is a per-call failure, not a break.
 - **Bounded, jittered backoff.** Delay grows from `reconnect_initial_backoff_seconds` by
   `reconnect_backoff_multiplier` up to `reconnect_max_backoff_seconds`, with ±20% jitter so
   retries don't lock-step. It never hammers a down endpoint.
@@ -224,8 +230,8 @@ safely against a backend that cannot take them at once. Three levels, each with 
 
 | Level | Carries |
 |---|---|
-| `WARNING`+ | The backend went away; the backend came back. A call the backend did not answer within its timeout. A configuration only the operator can correct: at startup, an exposure policy the proxy narrowed (allow-list and deny-list both set for a surface; a tool filter that hides `backend_status`), and after the first successful listing of a surface, each filter name the backend does not have — each reported once. Quiet == healthy, so this level is what an alert rule watches. |
-| `INFO` | Two records per call — one on acceptance (client, op, queue depth), one on completion (queue wait, backend exec; for a call the backend declines, such as a method it does not implement, the completion record says so). Arrival order vs. service order, which is the readable proof the queue works. A hang appears as an acceptance with no completion. The `Mcp-Param-*` header check on a 2026-07-28 tool call reads the tool list the proxy last served (`ListedToolSchemas`), so it adds no operation and no record. |
+| `WARNING`+ | The backend went away; the backend came back. A call the backend did not answer within its timeout, and a call that timed out waiting in the queue behind it. A configuration only the operator can correct: at startup, an exposure policy the proxy narrowed (allow-list and deny-list both set for a surface; a tool filter that hides `backend_status`), and after the first successful listing of a surface, each filter name the backend does not have — each reported once. Quiet == healthy, so this level is what an alert rule watches. |
+| `INFO` | Two records per call — one on acceptance (client, op, queue depth), one on completion (queue wait, backend exec; for a call the backend declines, such as a method it does not implement, the completion record says so; for a call its caller withdrew before it started, the withdrawal is the second record). Arrival order vs. service order, which is the readable proof the queue works. A hang appears as an acceptance with no completion. The `Mcp-Param-*` header check on a 2026-07-28 tool call reads the tool list the proxy last served (`ListedToolSchemas`), so it adds no operation and no record. |
 | `DEBUG` | One extra record when a call actually starts running, which separates *waiting in the queue* from *at the backend, unanswered* — the two hangs that otherwise look identical. |
 
 Two structural points, both load-bearing:

@@ -75,6 +75,8 @@ connection, or an operation on the backend's queue that no client asked for. No 
   instead of the result.
 - [#21] — a 2026-07-28 client's tool call with arguments puts an extra `tools/list` on the
   backend's queue, logged as that client's.
+- [#23] — a queued call's timeout counts its wait in the queue, and a call whose caller has
+  already received the timeout error still runs at the backend.
 
 ## Later
 
@@ -156,3 +158,4 @@ Ideas without an issue or a release.
 [#8]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/8
 [#20]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/20
 [#21]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/21
+[#23]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/23
