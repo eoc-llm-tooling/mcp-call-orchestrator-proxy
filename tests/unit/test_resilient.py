@@ -27,6 +27,7 @@ from mcp.shared.exceptions import McpError
 from mcp_call_orchestrator_proxy.interfaces import MCPBackendClient
 from mcp_call_orchestrator_proxy.resilient import (
     BackendUnavailableError,
+    MethodNotSupportedError,
     ResilientBackend,
 )
 
@@ -312,15 +313,36 @@ async def test_ordinary_mcp_error_is_not_a_connection_break() -> None:
         clients_before = len(controller.built)
 
         controller.tool_error = McpError(
-            mcp_types.ErrorData(code=-32601, message="Method not found")
+            mcp_types.ErrorData(code=-32602, message="Invalid params")
         )
-        with pytest.raises(McpError):
+        with pytest.raises(McpError) as raised:
             await backend.call_tool_mcp("echo", {"value": "b"})
+        assert raised.value is controller.tool_error
 
         # The connection is untouched: no rebuild, still reporting connected.
         assert len(controller.built) == clients_before, (
             "an ordinary McpError wrongly tore down and rebuilt the connection"
         )
+        assert backend.status_snapshot()["connected"] is True
+
+
+@pytest.mark.asyncio
+async def test_method_not_found_is_raised_as_method_not_supported() -> None:
+    """A backend's "Method not found" answer gets its own type, keeps its
+    ``ErrorData`` (FastMCP reads the code), and leaves the connection live."""
+    controller = BackendController()
+
+    async with _make_backend(controller) as backend:
+        assert await _wait_until(lambda: backend.status_snapshot()["connected"] is True)
+        clients_before = len(controller.built)
+
+        error = mcp_types.ErrorData(code=-32601, message="Method not found")
+        controller.tool_error = McpError(error)
+        with pytest.raises(MethodNotSupportedError) as raised:
+            await backend.call_tool_mcp("echo", {"value": "b"})
+        assert raised.value.error == error
+
+        assert len(controller.built) == clients_before
         assert backend.status_snapshot()["connected"] is True
 
 

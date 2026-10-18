@@ -56,6 +56,11 @@ class CallOrchestrator:
     without a traceback; everything else keeps the full-traceback ERROR. The
     set is injected rather than hard-coded because the queue is deliberately
     ignorant of what it is queueing; the composition root knows.
+
+    `declined_errors` are the exception types that mean "the backend answered,
+    declining the call as a normal condition" - for this project, a method the
+    backend does not implement. They are reported at INFO without a traceback,
+    as the call's completion record. Injected for the same reason.
     """
 
     def __init__(
@@ -64,6 +69,7 @@ class CallOrchestrator:
         max_concurrent: int = 1,
         call_timeout: float = 120.0,
         expected_errors: tuple[type[BaseException], ...] = (),
+        declined_errors: tuple[type[BaseException], ...] = (),
     ) -> None:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be >= 1")
@@ -71,6 +77,7 @@ class CallOrchestrator:
         self._max_concurrent = max_concurrent
         self._call_timeout = call_timeout
         self._expected_errors = expected_errors
+        self._declined_errors = declined_errors
 
         self._queue: asyncio.Queue[_QueuedCall[Any]] = asyncio.Queue()
         self._dispatcher_task: asyncio.Task[None] | None = None
@@ -203,6 +210,20 @@ class CallOrchestrator:
                 "orchestrator: call failed, backend degraded (client=%s op=%s): %s",
                 queued.client_label,
                 queued.op_label,
+                exc,
+            )
+            if not queued.future.done():
+                queued.future.set_exception(exc)
+        except self._declined_errors as exc:
+            # INFO, like a completion: the backend answered, and the acceptance
+            # record must still have its pair, or the call reads as a hang.
+            logger.info(
+                "orchestrator: call declined by the backend client=%s op=%s "
+                "wait=%.3fs exec=%.3fs: %s",
+                queued.client_label,
+                queued.op_label,
+                queue_wait,
+                time.monotonic() - started,
                 exc,
             )
             if not queued.future.done():

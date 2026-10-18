@@ -237,6 +237,37 @@ async def test_an_absorbed_failure_and_a_genuine_one_are_told_apart_by_level(
 
 
 @pytest.mark.asyncio
+async def test_a_declined_call_is_its_completion_record_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A call the backend declines as a normal condition is reported at INFO,
+    without a traceback, as the pair of its acceptance record - and the error
+    still reaches the caller."""
+    caplog.set_level(logging.DEBUG, logger=ORCHESTRATOR_LOGGER)
+
+    class NotSupported(Exception):
+        """Stands in for the real MethodNotSupportedError; the queue is generic."""
+
+    async def declined() -> str:
+        raise NotSupported("Method not found")
+
+    async with CallOrchestrator(declined_errors=(NotSupported,)) as orch:
+        with pytest.raises(NotSupported):
+            await orch.submit(declined, label="list_prompts", client="agent-a")
+
+    records = [r for r in caplog.records if r.name.startswith(ORCHESTRATOR_LOGGER)]
+    declined_records = [r for r in records if "declined" in r.getMessage()]
+
+    assert len(declined_records) == 1
+    assert declined_records[0].levelno == logging.INFO
+    assert declined_records[0].exc_info is None
+    message = declined_records[0].getMessage()
+    assert "client=agent-a" in message and "op=list_prompts" in message
+    assert "wait=" in message and "exec=" in message
+    assert not [r for r in records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.asyncio
 async def test_the_verbose_level_separates_a_queued_call_from_a_running_one(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

@@ -65,6 +65,12 @@ process. A backend "dying" is modelled by the `crash` tool (`os._exit(1)`, since
 port to `SIGKILL` from outside); "no orphaned child remains" is checked by recording the child's
 own `pid()` and polling `os.kill(pid, 0)` for `ProcessLookupError` after the proxy lets go of it.
 
+**Spawned tools-only stdio backend** (`tests/support/tools_only_backend_server.py`) — the MCP
+SDK's low-level `Server` with only `tools/list` and `tools/call` registered, so prompt and
+resource listings get the JSON-RPC `-32601` "Method not found" answer a FastMCP server never
+gives (`tests/component/test_tools_only_backend_stdio.py`). The test writes its `command`/`args`
+config itself.
+
 Selection rule: use the spawned server for claims about protocol, transport, the `client.py`
 path, or what the backend actually observed; use a mock for backend states that must be forced.
 

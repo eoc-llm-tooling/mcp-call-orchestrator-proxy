@@ -43,7 +43,9 @@ style. Toolchain and commands (how to install, lint, test, run the gate) live in
   through untouched; only *transport/connection* problems surface as exceptions. Connection
   errors are caught against the `_CONNECTION_ERRORS` set and converted to
   `BackendUnavailableError` (a `RuntimeError` subclass FastMCP maps to a clean MCP error).
-  Don't swallow connection errors as tool errors or vice versa.
+  A backend's "Method not found" answer becomes `MethodNotSupportedError`, an `McpError`
+  subclass that keeps the original `ErrorData`. Don't swallow connection errors as tool errors
+  or vice versa.
 - **Logging:** module-level `logger = logging.getLogger(__name__)`. Never `print` in library
   code (the CLI uses `typer.echo` for user-facing lines, which is fine). Log the *why*;
   reserve `logger.exception` for genuinely unexpected paths.
