@@ -22,6 +22,10 @@ rejected (won't fix or not a bug, reason in Resolution).
 | # | Issue | Component | Severity | Status |
 |---|---|---|---|---|
 | [PRB-1](#prb-1--proxy-doesnt-self-heal-after-a-backend-session-is-terminated-clean-404) | Proxy doesn't self-heal after a backend *session* is terminated (clean 404) | resilience (`resilient.py`) | major | [x] |
+| [PRB-2](#prb-2--fastmcp-transform-keys-in-the-backend-entry-bypass-the-stdio-keep_alive-override-and-the-tls-setting) | FastMCP transform keys in the backend entry bypass the stdio `keep_alive` override and the TLS setting | backend client (`client.py`) | major | [x] |
+| [PRB-3](#prb-3--unbounded-fastmcp-and-mcp-ranges-let-a-fresh-install-pull-versions-the-proxy-cannot-import) | Unbounded `fastmcp` and `mcp` ranges let a fresh install pull versions the proxy cannot import | packaging (`pyproject.toml`) | major | [x] |
+| [PRB-4](#prb-4--tool-schemas-reach-clients-with-ref-inlined) | Tool schemas reach clients with `$ref` inlined | proxy server (`server.py`) | major | [x] |
+| [PRB-5](#prb-5--a-config-with-more-than-one-server-is-not-refused-at-startup) | A config with more than one server is not refused at startup | backend client (`client.py`) | major | [x] |
 
 ---
 
@@ -126,3 +130,140 @@ session, and the existing resilience test (`test_real_backend_http.py`) kills th
 producing a transport-level error already in `_CONNECTION_ERRORS` rather than the clean-404 path.
 The uncovered case is a backend restart that cleanly rejects the old session within one proxy
 lifetime.
+
+---
+
+## PRB-2 — FastMCP transform keys in the backend entry bypass the stdio keep_alive override and the TLS setting
+
+**Status:** Closed
+**Severity:** major · **Component:** backend client ([`client.py`](../src/mcp_call_orchestrator_proxy/client.py))
+**Raised:** 2026-10-18 · **Closed:** 2026-10-18
+
+**Problem.** When the single `mcpServers` entry contains `tools`, `include_tags` or
+`exclude_tags`, the proxy reaches the backend through a nested in-process FastMCP proxy around
+the real transport. The `StdioTransport` check never matches, so `keep_alive=False` is not
+applied; the HTTP/SSE check never matches, so the TLS setting is not applied. Nothing is logged.
+
+**Impact.** An operator who uses FastMCP's documented transform keys silently loses the guarantee
+that a stdio backend's subprocess is not left behind, loses their TLS setting, and gets an extra
+proxy layer. Workaround: do not use those keys.
+
+**Cause.** `client.py` called `to_transport()` on the parsed entry. FastMCP parses an entry with
+transform keys as a transforming server, whose `to_transport()` returns
+`FastMCPTransport(create_proxy(Client(<real transport>)))`, so the overrides in `client.py` saw
+only the outer transport. Reproduced on FastMCP 3.4.4 and 4.1.0: the same entry gives a
+`FastMCPTransport` with `tools` and a `StdioTransport` without.
+→ analysis trail: [issue #1](https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/1)
+
+**Urgent action.** none
+
+**Resolution.** 2026-10-18 — The transport is built from the plain entry type, so the overrides
+always reach the real transport, and an entry carrying any of the three keys is refused at
+startup with an error naming the key. Shipped in [pull request #13](https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/pull/13) (merge
+`ebc890a`), released in v0.4.3. Honouring the safe subset of the `tools` key is planned
+separately ([issue #8](https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/8)).
+
+**Verification.** 2026-10-18 — Unit tests that fail before the fix and pass after:
+`test_stdio_entry_with_a_transform_key_still_gets_keep_alive_off`,
+`test_http_entry_with_a_transform_key_still_gets_the_tls_setting`,
+`test_a_transform_key_in_the_entry_stops_the_proxy_at_startup`,
+`test_every_transform_key_present_is_named`; `test_a_plain_entry_starts_the_proxy` covers the
+unchanged path.
+
+---
+
+## PRB-3 — Unbounded fastmcp and mcp ranges let a fresh install pull versions the proxy cannot import
+
+**Status:** Closed
+**Severity:** major · **Component:** packaging ([`pyproject.toml`](../pyproject.toml))
+**Raised:** 2026-10-18 · **Closed:** 2026-10-18
+
+**Problem.** `pyproject.toml` declared `fastmcp>=3.4.4` and `mcp>=1.28.1`. FastMCP 4.1.0, which
+pulls MCP SDK 2.3.0, satisfies both, and with it importing the application fails:
+`ImportError: cannot import name 'McpError' from 'mcp.shared.exceptions'`.
+
+**Impact.** `uv sync` against the committed `uv.lock` is unaffected. Any fresh resolution —
+`uv lock --upgrade`, a dependency bot, an install that ignores the lock, an image built without
+it — gives a proxy that does not start.
+
+**Cause.** MCP SDK 2 renamed `McpError` to `MCPError`, and `resilient.py` imports the old name.
+Beyond the import, FastMCP 4 fails to connect to a backend and to complete client handshakes with
+the proxy's facade, so moving to it is a project of its own ([issue #5](https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/5)).
+→ analysis trail: [issue #2](https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/2)
+
+**Urgent action.** none
+
+**Resolution.** 2026-10-18 — Ranges capped at `fastmcp>=3.4.4,<4` and `mcp>=1.28.1,<2`; the
+locked versions are unchanged. Shipped in [pull request #10](https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/pull/10) (merge `b1ba380`),
+released in v0.4.3.
+
+**Verification.** 2026-10-18 — A fresh resolution of the capped ranges picks FastMCP 3.4.9 and
+MCP SDK 1.30.0, and the check command passes on them; with the old ranges it picks FastMCP 4.1.1
+and MCP SDK 2.3.0.
+
+---
+
+## PRB-4 — Tool schemas reach clients with `$ref` inlined
+
+**Status:** Closed
+**Severity:** major · **Component:** proxy server ([`server.py`](../src/mcp_call_orchestrator_proxy/server.py))
+**Raised:** 2026-10-18 · **Closed:** 2026-10-18
+
+**Problem.** A backend tool whose input schema uses `$ref` — to `$defs`, or an internal pointer
+such as `#/properties/destination/properties/parent/anyOf/0` — reached clients with the
+referenced subschema copied in place and `$defs` removed. Recursive schemas passed through
+unchanged, so the proxy altered some schemas and not others. The integration parity test failed
+against a real backend whose schemas use `$ref`.
+
+**Impact.** Accepted inputs stayed the same, but the documented guarantee that names and schema
+structure reach clients unchanged failed, and any client or test comparing schemas saw a
+difference.
+
+**Cause.** FastMCP's server defaults to `dereference_schemas=True`, which adds
+`DereferenceRefsMiddleware` to inline `$ref` on listing; `build_proxy_server` did not turn it off.
+With the middleware removed, every reproduced schema is byte-identical to the backend's.
+→ analysis trail: [issue #4](https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/4)
+
+**Urgent action.** none
+
+**Resolution.** 2026-10-18 — The proxy's server is built with `dereference_schemas=False`, keeping
+exact parity; FastMCP's inlining serves clients that cannot read `$ref`, and an opt-in setting
+for them would be a separate feature. Shipped in [pull request #11](https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/pull/11) (merge
+`5e44e5f`), released in v0.4.3.
+
+**Verification.** 2026-10-18 — `test_schemas_with_ref_reach_clients_unchanged` (component tier)
+fails before the fix and passes after, for a `$defs` schema and an internal-pointer schema; the
+integration parity test passes against a real backend whose schemas use `$ref`.
+
+---
+
+## PRB-5 — A config with more than one server is not refused at startup
+
+**Status:** Closed
+**Severity:** major · **Component:** backend client ([`client.py`](../src/mcp_call_orchestrator_proxy/client.py))
+**Raised:** 2026-10-18 · **Closed:** 2026-10-18
+
+**Problem.** With an `mcpServers` file that defines two servers, the proxy started and served.
+Every backend connection attempt then logged `resilient: unexpected error in backend supervisor;
+will retry` at ERROR with a traceback ending in the single-backend `ValueError`, for as long as
+the process ran. Clients could connect and saw only `backend_status`.
+
+**Impact.** An operator with a multi-server file got a proxy that looked started but never reached
+a backend, with ERROR tracebacks at every backoff step. Workaround: define exactly one server.
+
+**Cause.** The one-backend check ran only in `client.py::_single_server_transport`, which the
+backend factory calls on each connect attempt inside `ResilientBackend._supervise`; its
+`ValueError` reached the supervisor's generic exception handler and was retried. Nothing on the
+startup path counted the servers.
+→ analysis trail: [issue #14](https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/14)
+
+**Urgent action.** none
+
+**Resolution.** 2026-10-18 — `check_backend_config`, called by `create_proxy_app` at startup,
+refuses a config that does not define exactly one server; the per-connect check stays. A config
+with no server is refused with the same error. Shipped in [pull request #16](https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/pull/16)
+(merge `4f4e695`), released in v0.4.3.
+
+**Verification.** 2026-10-18 — `test_a_config_without_exactly_one_server_stops_the_proxy_at_startup`
+fails before the fix and passes after, with two servers and with none; `run` with a two-server
+config exits with status 1 before it listens.
