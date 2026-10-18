@@ -11,15 +11,16 @@ Status: `proposed` · `agreed` · `retired`. Priority: `must` · `should` · `co
 ### OCP-N-001 — Several clients share one backend safely
 
 **Statement.** When several clients use the proxy at once, the proxy shall pass their calls to
-the backend no more than the configured number at a time (one by default), terminate each
-client's session at the proxy, and deliver every result only to the session that made the call.
+the backend no more than the configured number at a time (one by default), be the backend's only
+client, ending each client's requests at the proxy whatever protocol version the client uses, and
+deliver every result only to the client that made the call.
 
 **Rationale.** Many MCP servers cannot serve concurrent clients: a single stdio pipe or a single
 backend session serves one caller at a time. The proxy exists to make such a server usable by
 several agents.
 
-**Acceptance.** Concurrent sessions calling a slow tool never cause more than the limit of calls
-to run at the backend at once, and no session receives another session's result.
+**Acceptance.** Concurrent clients calling a slow tool never cause more than the limit of calls
+to run at the backend at once, and no client receives another client's result.
 
 **Priority.** must · **Status.** agreed
 
@@ -152,7 +153,7 @@ proxy sits between the two.
 **Acceptance.** Each pairing of an older and a newer protocol version, on the client side and on
 the backend side, completes discovery and a tool call through the proxy.
 
-**Priority.** must · **Status.** proposed
+**Priority.** must · **Status.** agreed
 
 ## Exposure and guidance
 
@@ -234,15 +235,20 @@ is empty, and the log of a backend outage shows the outage and the recovery.
 ### OCP-N-016 — Default-level logs show the queue at work, per client
 
 **Statement.** At the default level, the proxy shall log two records per call: one when the call
-is accepted, with the client, the operation and the queue depth, and one when it completes, with
-the time spent waiting and running.
+is accepted, with the client as it names itself, the operation and the queue depth, and one when
+it completes, with the time spent waiting and running. Where the client's protocol version has
+sessions, the client's name shall carry a number per session.
 
 **Rationale.** That the proxy serializes calls is its whole value; the operator can only confirm
 it from the order of arrival against the order of service, attributed to clients. A call with an
-acceptance and no completion shows a hang.
+acceptance and no completion shows a hang. From protocol version 2026-07-28 a client has no
+session, so two instances of one client that give the same name cannot be told apart, and the
+log does not pretend to.
 
 **Acceptance.** After two clients call concurrently, the default-level log shows which calls came
-from which client, in what order they were served, and that they did not overlap at the backend.
+from which client, told apart by session number on a protocol version with sessions and by their
+names on 2026-07-28, in what order they were served, and that they did not overlap at the
+backend.
 
 **Priority.** must · **Status.** agreed
 
