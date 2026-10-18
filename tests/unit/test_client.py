@@ -22,7 +22,10 @@ from fastmcp.client.transports.http import StreamableHttpTransport
 
 from mcp_call_orchestrator_proxy import client as client_module
 from mcp_call_orchestrator_proxy.app import create_proxy_app
-from mcp_call_orchestrator_proxy.client import build_real_backend_client
+from mcp_call_orchestrator_proxy.client import (
+    RelayClientSession,
+    build_real_backend_client,
+)
 from mcp_call_orchestrator_proxy.config import ProxySettings
 
 TRANSFORM_KEYS: list[tuple[str, Any]] = [
@@ -212,3 +215,28 @@ def test_the_backend_http_client_reads_longer_than_a_call_may_take(
     assert kwargs["verify"] is verify
     assert kwargs["timeout"].read > settings.call_timeout_seconds
     assert kwargs["timeout"].connect == 30.0
+
+
+@pytest.mark.parametrize("source", ["http-config", "stdio-config", "fields"])
+def test_the_backend_client_relays_tool_results_unchecked(
+    tmp_path: Path, source: str
+) -> None:
+    """Each source builds a client whose session skips the output-schema check:
+    a mismatch raises ``RuntimeError``, which reads as a broken connection."""
+    if source == "fields":
+        settings = ProxySettings(
+            backend_mcp_url="https://127.0.0.1:27124/mcp/", backend_api_key="a" * 32
+        )
+    else:
+        entry: dict[str, Any] = (
+            {"url": "https://127.0.0.1:27124/mcp/"}
+            if source == "http-config"
+            else {"command": "probe-backend", "args": []}
+        )
+        settings = ProxySettings(backend_config=_write_config(tmp_path, entry))
+
+    client = build_real_backend_client(settings)
+
+    options = client._transport_options
+    assert options is not None
+    assert options.session_class is RelayClientSession

@@ -102,7 +102,8 @@ clients. Tools: `echo`, `slow_echo` (delay, to widen the overlap window), `hang`
 returns), `call_stats` (total calls and peak concurrent calls, excluding itself), `pid` (this
 process's own pid — a stdio backend has no port to identify it by), `header_echo` (`echo`
 whose argument is declared for an `Mcp-Param-*` HTTP header, so a 2026-07-28 backend rejects a
-call without the header), `crash` (`os._exit(1)`,
+call without the header), `mismatched_output` (structured content its declared output schema
+rejects, as from a backend with a schema bug), `crash` (`os._exit(1)`,
 models a stdio backend dying), `env_var` (echoes back one entry of this process's own
 environment, for the env-isolation claim). Extend it when a scenario needs backend behaviour
 that only a controlled server can produce.

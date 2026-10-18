@@ -25,7 +25,9 @@ test can see exactly what reached the child).
 It declares server instructions (``INSTRUCTIONS``), so a test can see whether
 they reach the proxy's clients, and ``header_echo``, whose argument is declared
 for an ``Mcp-Param-*`` HTTP header (``x-mcp-header``): on 2026-07-28 the server
-rejects a call to it that does not carry the header.
+rejects a call to it that does not carry the header. ``mismatched_output``
+returns structured content its own declared output schema rejects, as a backend
+with a schema bug does.
 
 Run as a script; it either binds the loopback port it is given and serves
 Streamable HTTP on it, or serves over stdio::
@@ -52,11 +54,20 @@ from typing import Annotated, Any
 
 from fastmcp import FastMCP
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools import ToolResult
 from mcp import MCPError
 from mcp import types as mcp_types
 from pydantic import Field
 
 INSTRUCTIONS = "PROBE BACKEND INSTRUCTIONS"
+
+# `mismatched_output` declares this schema and returns content it rejects.
+MISMATCHED_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"n": {"type": "integer"}},
+    "required": ["n"],
+}
+MISMATCHED_OUTPUT = {"n": "many"}
 
 # A hang must outlive any timeout under test without pinning the process open
 # forever if a teardown is ever missed.
@@ -123,6 +134,12 @@ def build_server(*, legacy: bool = False) -> FastMCP:
         """Echo the given value back verbatim; it travels as a header too."""
         async with stats.in_flight():
             return region
+
+    @mcp.tool(output_schema=MISMATCHED_OUTPUT_SCHEMA)
+    async def mismatched_output() -> ToolResult:
+        """Return structured content that the declared output schema rejects."""
+        async with stats.in_flight():
+            return ToolResult(structured_content=MISMATCHED_OUTPUT)
 
     @mcp.tool
     async def slow_echo(value: str, delay_seconds: float = 0.2) -> str:
