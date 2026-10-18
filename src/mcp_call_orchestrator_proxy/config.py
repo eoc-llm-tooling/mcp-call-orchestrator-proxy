@@ -81,7 +81,8 @@ class ProxySettings(BaseSettings):
     )
     call_timeout_seconds: float = Field(
         default=120.0,
-        description="Timeout for a single backend tool call.",
+        description="Timeout, applied separately, for a call's wait in the queue "
+        "and for the backend call itself.",
         gt=0,
     )
 

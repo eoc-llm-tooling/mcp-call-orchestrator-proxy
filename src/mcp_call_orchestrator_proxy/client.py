@@ -47,8 +47,9 @@ from mcp_call_orchestrator_proxy.config import ProxySettings
 
 _UNSUPPORTED_ENTRY_KEYS = ("tools", "include_tags", "exclude_tags")
 
-# How much longer the backend HTTP client waits on a read than a call may take.
-_HTTP_READ_GRACE_SECONDS = 5.0
+# How much longer the backend client's own timeouts - the MCP request's and the
+# HTTP read's - run than a call may take, so the queue's is the one that fires.
+_BACKSTOP_GRACE_SECONDS = 5.0
 
 
 class RelayClientSession(ClientSession):
@@ -77,14 +78,19 @@ def build_real_backend_client(settings: ProxySettings) -> Client[Any]:
     `verify=False` disables TLS verification for a self-signed cert.
     `init_timeout` bounds a single connect/initialize attempt so the resilient
     supervisor's retry loop stays responsive when the backend is slow or absent.
-    `timeout` bounds each call; a call that exceeds it fails alone. Tool
-    results are not checked against their output schema (`RelayClientSession`).
+    The queue's `call_timeout_seconds` bounds each call, and a call that
+    exceeds it fails alone; the client's own MCP request `timeout` is a
+    backstop, `_BACKSTOP_GRACE_SECONDS` longer. Of equal length, it could fire
+    first and fail the call with an `MCPError` that says nothing of the
+    timeout's length. Tool results are not checked against their output
+    schema (`RelayClientSession`).
     """
+    request_timeout = settings.call_timeout_seconds + _BACKSTOP_GRACE_SECONDS
     client: Client[Any]
     if settings.backend_config:
         transport = _single_server_transport(settings.backend_config)
         kwargs: dict[str, Any] = {
-            "timeout": settings.call_timeout_seconds,
+            "timeout": request_timeout,
             "init_timeout": settings.connect_timeout_seconds,
         }
         # `verify` only applies to HTTP transports; a stdio backend has no TLS.
@@ -96,13 +102,13 @@ def build_real_backend_client(settings: ProxySettings) -> Client[Any]:
             settings.backend_mcp_url,
             auth=settings.backend_api_key,
             verify=settings.backend_verify_tls,
-            timeout=settings.call_timeout_seconds,
+            timeout=request_timeout,
             init_timeout=settings.connect_timeout_seconds,
         )
     if isinstance(client.transport, StreamableHttpTransport):
         client.transport.httpx_client_factory = _http_client_factory(
             verify=settings.backend_verify_tls,
-            read_timeout=settings.call_timeout_seconds + _HTTP_READ_GRACE_SECONDS,
+            read_timeout=request_timeout,
         )
     # `Client` takes its session class only from these options, and has no
     # constructor argument for them; FastMCP's own `ProxyClient` sets them so.
@@ -115,13 +121,12 @@ def _http_client_factory(
 ) -> Callable[..., httpx2.AsyncClient]:
     """Build the backend's HTTP client with a read timeout longer than a call.
 
-    A call that outlasts its timeout is cancelled by the queue (the MCP request
-    timeout, of the same length, is the backstop), and the MCP SDK then
-    abandons that one request, aborting its HTTP request on a 2026-07-28
-    connection. `fastmcp.Client` would otherwise set the HTTP read timeout to
-    the call timeout as well; when it fires first on a 2026-07-28 connection,
-    whose answers are not streamed, the SDK's transport fails as a whole and
-    ends the connection under every call queued behind the hung one. FastMCP
+    A call that outlasts its timeout is cancelled by the queue, and the MCP SDK
+    then abandons that one request, aborting its HTTP request on a 2026-07-28
+    connection. A read timeout that fires first on a 2026-07-28 connection,
+    whose answers are not streamed, makes the SDK's transport fail as a whole
+    and end the connection under every call queued behind the hung one; so
+    the read timeout is the MCP request timeout, longer than a call's. FastMCP
     ignores `verify` once a factory is set, so the factory applies it.
     """
 

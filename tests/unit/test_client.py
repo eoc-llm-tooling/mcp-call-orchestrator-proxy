@@ -240,3 +240,28 @@ def test_the_backend_client_relays_tool_results_unchecked(
     options = client._transport_options
     assert options is not None
     assert options.session_class is RelayClientSession
+
+
+@pytest.mark.parametrize("source", ["config", "fields"])
+def test_the_backend_request_timeout_outlasts_the_call_timeout(
+    tmp_path: Path, source: str
+) -> None:
+    """The queue's timeout must be the one that fails a call: an MCP request
+    timeout of equal length could fire first, with an error that names no
+    duration."""
+    url = "https://127.0.0.1:27124/mcp/"
+    if source == "config":
+        settings = ProxySettings(
+            backend_config=_write_config(tmp_path, {"url": url}),
+            call_timeout_seconds=7.0,
+        )
+    else:
+        settings = ProxySettings(
+            backend_mcp_url=url, backend_api_key="a" * 32, call_timeout_seconds=7.0
+        )
+
+    client = build_real_backend_client(settings)
+
+    request_timeout = client._session_kwargs["read_timeout_seconds"]
+    assert request_timeout is not None
+    assert request_timeout > settings.call_timeout_seconds

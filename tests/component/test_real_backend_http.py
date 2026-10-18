@@ -34,7 +34,7 @@ import pytest
 from fastmcp import Client
 
 from mcp_call_orchestrator_proxy.app import create_proxy_app
-from mcp_call_orchestrator_proxy.client import _HTTP_READ_GRACE_SECONDS
+from mcp_call_orchestrator_proxy.client import _BACKSTOP_GRACE_SECONDS
 from mcp_call_orchestrator_proxy.config import ProxySettings
 
 pytestmark = pytest.mark.component
@@ -366,7 +366,7 @@ async def test_a_call_queued_behind_a_hung_call_completes(
 
         # Past the backend HTTP client's read timeout: had the hung request not
         # been abandoned, the read timeout would have ended the connection by now.
-        await asyncio.sleep(settings.call_timeout_seconds + _HTTP_READ_GRACE_SECONDS)
+        await asyncio.sleep(settings.call_timeout_seconds + _BACKSTOP_GRACE_SECONDS)
         later = await queued.call_tool(
             "echo", {"value": "after the read timeout"}, raise_on_error=False
         )
@@ -376,6 +376,97 @@ async def test_a_call_queued_behind_a_hung_call_completes(
     assert echoed.content[0].text == "queued behind the hang"
     assert not later.is_error, f"the connection did not outlive the hang: {later}"
     assert later.content[0].text == "after the read timeout"
+
+
+@pytest.mark.asyncio
+@BACKEND_KINDS
+async def test_a_queued_call_runs_for_its_whole_timeout_after_the_wait(
+    spawn_backend, backend_config_file, serve_over_http, backend_legacy: bool
+) -> None:
+    """A call that waits 1.5 s behind a hung call, then runs for 1 s, completes
+    under a 2 s timeout: the wait and the run are each bounded on their own. The
+    queued client speaks 2025-11-25, so no header check lists tools ahead of it."""
+    backend = spawn_backend(legacy=backend_legacy)
+    settings = ProxySettings(
+        backend_config=backend_config_file(backend.url),
+        call_timeout_seconds=2.0,
+        **_RESILIENCE_TUNING,
+    )
+    proxy_app = create_proxy_app(settings=settings)
+
+    async with (
+        serve_over_http(proxy_app.mcp) as url,
+        Client(url) as hanging,
+        Client(url, mode="legacy") as queued,
+    ):
+        hung = asyncio.create_task(hanging.call_tool("hang", {}, raise_on_error=False))
+        await asyncio.sleep(0.5)
+        echoed = await queued.call_tool(
+            "slow_echo",
+            {"value": "after the wait", "delay_seconds": 1.0},
+            raise_on_error=False,
+        )
+        await asyncio.wait_for(hung, timeout=20.0)
+
+    assert not echoed.is_error, f"the queued call failed: {echoed.content}"
+    assert echoed.content[0].text == "after the wait"
+
+
+@pytest.mark.asyncio
+async def test_a_call_whose_caller_timed_out_never_reaches_the_backend(
+    spawn_backend,
+    backend_config_file,
+    serve_over_http,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With a 2 s timeout, ``echo`` queued behind two ``hang`` calls times out in
+    the queue. Its caller is told so, and the backend never serves it - for a
+    tool with side effects, a retry would otherwise perform it twice. The
+    backend is read once the queue would have reached the ``echo``: after both
+    hung calls have each run for the whole timeout."""
+    caplog.set_level(logging.INFO, logger="mcp_call_orchestrator_proxy")
+    backend = spawn_backend()
+    settings = ProxySettings(
+        backend_config=backend_config_file(backend.url),
+        call_timeout_seconds=2.0,
+        **_RESILIENCE_TUNING,
+    )
+    proxy_app = create_proxy_app(settings=settings)
+
+    async with (
+        serve_over_http(proxy_app.mcp) as url,
+        Client(url) as first,
+        Client(url) as second,
+        Client(url, mode="legacy") as third,
+    ):
+        started = time.monotonic()
+        hung = asyncio.create_task(first.call_tool("hang", {}, raise_on_error=False))
+        await asyncio.sleep(0.3)
+        behind = asyncio.create_task(second.call_tool("hang", {}, raise_on_error=False))
+        await asyncio.sleep(0.3)
+        echoed = await third.call_tool(
+            "echo", {"value": "never served"}, raise_on_error=False
+        )
+        hung_result = await asyncio.wait_for(hung, timeout=20.0)
+        behind_result = await asyncio.wait_for(behind, timeout=20.0)
+        await asyncio.sleep(max(0.0, started + 6.0 - time.monotonic()))
+        stats = await read_backend_stats(backend.url)
+
+    completed = [
+        r.getMessage() for r in caplog.records if "call completed" in r.getMessage()
+    ]
+    assert stats["total_calls"] == 2, stats
+    assert not [m for m in completed if "op=call_tool:echo" in m], completed
+    assert echoed.is_error
+    assert echoed.content[0].text == (
+        "Error calling tool 'echo': "
+        "Timed out after 2s waiting in the queue for the backend"
+    )
+    for result in (hung_result, behind_result):
+        assert result.is_error
+        assert result.content[0].text == (
+            "Error calling tool 'hang': Backend call timed out after 2s"
+        )
 
 
 @pytest.mark.asyncio
