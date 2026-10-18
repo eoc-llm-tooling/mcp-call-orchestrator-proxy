@@ -26,6 +26,8 @@ rejected (won't fix or not a bug, reason in Resolution).
 | [PRB-3](#prb-3--unbounded-fastmcp-and-mcp-ranges-let-a-fresh-install-pull-versions-the-proxy-cannot-import) | Unbounded `fastmcp` and `mcp` ranges let a fresh install pull versions the proxy cannot import | packaging (`pyproject.toml`) | major | [x] |
 | [PRB-4](#prb-4--tool-schemas-reach-clients-with-ref-inlined) | Tool schemas reach clients with `$ref` inlined | proxy server (`server.py`) | major | [x] |
 | [PRB-5](#prb-5--a-config-with-more-than-one-server-is-not-refused-at-startup) | A config with more than one server is not refused at startup | backend client (`client.py`) | major | [x] |
+| [PRB-6](#prb-6--a-tool-result-that-does-not-match-its-output-schema-tears-down-the-backend-connection) | A tool result that does not match its output schema tears down the backend connection | backend client (`client.py`) | major | [x] |
+| [PRB-7](#prb-7--a-queued-calls-timeout-counts-its-wait-and-a-call-whose-caller-timed-out-still-runs) | A queued call's timeout counts its wait, and a call whose caller timed out still runs | queue (`orchestrator.py`) | major | [x] |
 
 ---
 
@@ -267,3 +269,80 @@ with no server is refused with the same error. Shipped in [pull request #16](htt
 **Verification.** 2026-10-18 — `test_a_config_without_exactly_one_server_stops_the_proxy_at_startup`
 fails before the fix and passes after, with two servers and with none; `run` with a two-server
 config exits with status 1 before it listens.
+
+## PRB-6 — A tool result that does not match its output schema tears down the backend connection
+
+**Status:** Closed
+**Severity:** major · **Component:** backend client ([`client.py`](../src/mcp_call_orchestrator_proxy/client.py))
+**Raised:** 2026-10-18 · **Closed:** 2026-10-19
+
+**Problem.** When a backend tool declared an `outputSchema` and returned `structuredContent`
+that did not match it, the caller received "Backend is not available … Invalid structured
+content returned by tool …" instead of the result. The proxy tore down and rebuilt the backend
+connection, restarting a stdio backend, and a call from another client just after it failed with
+"Backend is not available … Client is not connected".
+
+**Impact.** Every call in flight or queued behind such a call failed as an outage, at `WARNING`,
+for any backend whose output does not match its own schema. The proxy reshaped a result it should
+relay (OCP-C-002). No workaround in configuration.
+
+**Cause.** The proxy's backend client used the MCP SDK's `ClientSession`, which checks every tool
+result against the tool's output schema and raises `RuntimeError` on a mismatch.
+`ResilientBackend._guarded` counts `RuntimeError` as a broken connection, because FastMCP raises
+it for a client that is not connected, so the supervisor rebuilt the connection.
+→ analysis trail: [issue #20](https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/20)
+
+**Urgent action.** none
+
+**Resolution.** 2026-10-19 — the backend client uses `RelayClientSession`, a `ClientSession`
+whose result check does nothing, on every backend source; the proxy's own clients check what they
+receive. `RuntimeError` stays a broken connection. Shipped in
+[pull request #22](https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/pull/22) (merge `fbd4aaa`), released in v0.5.1.
+
+**Verification.** 2026-10-19 — `test_a_result_off_its_output_schema_reaches_the_caller_unchanged`
+fails before the fix and passes after, over a stdio backend and HTTP backends at both protocol
+versions: the caller receives the backend's `structuredContent`, a second client's call
+succeeds, and the connection is not rebuilt. `test_a_checking_client_rejects_the_relayed_result_itself`
+shows a client of the proxy still rejects the result in its own session.
+
+## PRB-7 — A queued call's timeout counts its wait, and a call whose caller timed out still runs
+
+**Status:** Closed
+**Severity:** major · **Component:** queue ([`orchestrator.py`](../src/mcp_call_orchestrator_proxy/orchestrator.py))
+**Raised:** 2026-10-18 · **Closed:** 2026-10-19
+
+**Problem.** `call_timeout_seconds` ran from the moment a call was queued. A call that waited
+behind a hung call failed when its own timeout ran out, with only what was left of it to run. A
+call whose caller had received the timeout error, or had been cancelled, stayed in the queue and
+still ran at the backend, logged as `call completed`. The error had an empty message
+(`Error calling tool 'echo': `), and a hung call was sometimes logged at `ERROR` as an unexpected
+fault with a traceback.
+
+**Impact.** OCP-N-002 failed: a call queued behind a hung one failed with it. For a tool with side
+effects the client was told the call failed while the backend performed it, and a retry performed
+it twice. The backend did work no caller waited for, and clients could not tell a wait in the
+queue from a backend that did not answer. A longer timeout only narrowed the window.
+
+**Cause.** `CallOrchestrator.submit` waited for the result with one deadline covering the wait in
+the queue and the run. On a timeout it cancelled the result future and left the call queued; the
+dispatcher started every queued call whatever the state of its future. It re-raised
+`wait_for`'s own `TimeoutError()`, which has no message. The backend client's MCP request timeout
+had the same length as the queue's, and when both fired the SDK's `MCPError` reached the
+orchestrator's catch-all.
+→ analysis trail: [issue #23](https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/23)
+
+**Urgent action.** none
+
+**Resolution.** 2026-10-19 — `call_timeout_seconds` bounds the wait in the queue and the backend
+call separately, each from its own start. A call whose caller is gone before it starts, by a
+timeout in the queue or by cancellation, is withdrawn and never reaches the backend. The errors
+say what timed out and after how long. The backend client's MCP request timeout runs 5 s longer
+than a call, so the queue's fires first. Shipped in [pull request #26](https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/pull/26) (merge
+`28d893d`), released in v0.5.1.
+
+**Verification.** 2026-10-19 — `test_a_call_whose_caller_timed_out_never_reaches_the_backend` and
+`test_a_queued_call_runs_for_its_whole_timeout_after_the_wait` fail before the fix and pass after,
+as do the unit tests for withdrawal on timeout and on cancellation and for the error texts. With
+real clients on both protocol versions, a call whose client cancelled or disconnected while it
+waited was withdrawn and never reached the backend. No `call raised an unexpected error` record
+in three runs of the HTTP component tests.
