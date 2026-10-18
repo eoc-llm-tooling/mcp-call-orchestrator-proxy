@@ -84,7 +84,7 @@ export MCP_PROXY_BACKEND_CONFIG="/path/to/backend.json"
 ```
 
 The config **must define exactly one server** — this proxy fronts a single
-backend. The `auth` string is sent as a Bearer token. TLS verification is *not*
+backend, and any other count stops it at startup with an error. The `auth` string is sent as a Bearer token. TLS verification is *not*
 part of the `mcpServers` format, so it stays a separate knob
 (`MCP_PROXY_BACKEND_VERIFY_TLS`, default `false`). An example lives at
 [`deploy/systemd/backend.example.json`](deploy/systemd/backend.example.json).

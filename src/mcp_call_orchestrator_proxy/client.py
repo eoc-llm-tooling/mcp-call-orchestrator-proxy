@@ -13,8 +13,9 @@ Two backend sources are supported (see `ProxySettings`):
   format has no verify field.
 - The individual `backend_mcp_url` + `backend_api_key` fields (fallback).
 
-FastMCP's transform keys (`tools`, `include_tags`, `exclude_tags`) are refused at
-startup (`check_backend_config`): FastMCP applies them through a nested
+A config that does not define exactly one server, and FastMCP's transform keys
+(`tools`, `include_tags`, `exclude_tags`), are refused at startup
+(`check_backend_config`). FastMCP applies the transform keys through a nested
 in-process proxy around the real transport, out of reach of the `keep_alive`
 and TLS settings this module applies.
 """
@@ -74,14 +75,8 @@ def _single_server_transport(config_path: str) -> ClientTransport:
     and prefix every tool name (`{server}_{tool}`), breaking exact parity.
     """
     config = MCPConfig.from_file(Path(config_path))
-    servers = config.mcpServers
-    if len(servers) != 1:
-        raise ValueError(
-            f"Backend config {config_path!r} must define exactly one MCP server "
-            f"(this proxy fronts a single backend); found {len(servers)}: "
-            f"{sorted(servers)}."
-        )
-    server = next(iter(servers.values()))
+    _require_single_server(config, config_path)
+    server = next(iter(config.mcpServers.values()))
     # The plain type's `to_transport`, never a transforming subclass's override:
     # that one returns a nested proxy, which the settings below cannot reach.
     transport: ClientTransport
@@ -104,16 +99,28 @@ def _single_server_transport(config_path: str) -> ClientTransport:
     return transport
 
 
-def check_backend_config(settings: ProxySettings) -> None:
-    """Refuse a backend config entry that carries a FastMCP transform key.
+def _require_single_server(config: MCPConfig, config_path: str) -> None:
+    servers = config.mcpServers
+    if len(servers) != 1:
+        raise ValueError(
+            f"Backend config {config_path!r} must define exactly one MCP server "
+            f"(this proxy fronts a single backend); found {len(servers)}: "
+            f"{sorted(servers)}."
+        )
 
-    Called once at startup, so the proxy does not start on a config whose keys
-    it would not apply. A key is refused whatever its value: FastMCP reads an
-    empty one as absent, but the operator still wrote it.
+
+def check_backend_config(settings: ProxySettings) -> None:
+    """Refuse a backend config this proxy cannot honour.
+
+    Called once at startup, so the proxy does not start on such a config. It
+    refuses a config that does not define exactly one server, and an entry
+    that carries a FastMCP transform key. A key is refused whatever its value:
+    FastMCP reads an empty one as absent, but the operator still wrote it.
     """
     if not settings.backend_config:
         return
     config = MCPConfig.from_file(Path(settings.backend_config))
+    _require_single_server(config, settings.backend_config)
     for name, server in config.mcpServers.items():
         given = server.model_fields_set | set(server.model_extra or {})
         refused = [key for key in _UNSUPPORTED_ENTRY_KEYS if key in given]
