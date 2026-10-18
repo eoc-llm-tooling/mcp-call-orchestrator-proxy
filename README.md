@@ -23,8 +23,8 @@ server, unchanged except for the added stability.
   2026-07-28 version are served side by side, and the backend's version is
   negotiated automatically, so any client reaches a backend of either kind.
 - **The backend's guidance is passed on** — clients receive the backend's server
-  `instructions`, and are offered prompts and resources only when the backend
-  has them.
+  `instructions`, and are offered only the capabilities the backend has (tools
+  always, for `backend_status`).
 - **Call serialization** — calls to the backend are queued and orchestrated
   (configurable concurrency) instead of racing each other.
 - **Resilient to the backend coming and going** — starts cleanly whether or not

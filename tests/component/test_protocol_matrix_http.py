@@ -33,6 +33,7 @@ from probe_backend_server import INSTRUCTIONS
 
 pytestmark = pytest.mark.component
 
+UI = "io.modelcontextprotocol/ui"
 HANDSHAKE = "2025-11-25"
 SESSIONLESS = "2026-07-28"
 
@@ -66,10 +67,16 @@ async def test_each_pairing_completes_discovery_and_a_tool_call(
     ):
         assert client.protocol_version == CLIENT_MODES[client_mode]
         assert client.instructions == INSTRUCTIONS
+        # Control for the tools-only backend: what this backend has is offered.
         capabilities = client.server_capabilities
         assert capabilities is not None
         assert capabilities.prompts is not None
         assert capabilities.resources is not None
+        assert capabilities.logging is not None
+        # Extensions exist only from 2026-07-28, so only a 2026-07-28 backend has
+        # one to pass on, and only a 2026-07-28 client is told of it.
+        ui_offered = client_mode == "auto" and not backend_legacy
+        assert (capabilities.extensions or {}).keys() == ({UI} if ui_offered else set())
 
         tools = {tool.name for tool in await client.list_tools()}
         assert {"echo", "slow_echo", "backend_status"} <= tools

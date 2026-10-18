@@ -1,7 +1,7 @@
 """A backend that implements tools only, reached over stdio through the proxy.
 
-Such a backend advertises neither the prompts nor the resources capability, so
-the proxy advertises neither to its clients. A client that lists them anyway is
+Such a backend advertises the tools capability and nothing else, so the proxy
+advertises nothing else to its clients either. A client that lists them anyway is
 answered by the backend with JSON-RPC -32601 "Method not found". That is a normal
 answer, so it must stay below WARNING and carry no traceback (ARCHITECTURE.md,
 "Severity carries meaning"), while clients still get empty listings. The backend is a real MCP server
@@ -83,7 +83,7 @@ async def test_unsupported_discovery_is_logged_below_warning_without_traceback(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("client_mode", ["legacy", "auto"])
-async def test_prompts_and_resources_are_not_advertised_when_the_backend_lacks_them(
+async def test_only_the_capabilities_the_backend_has_are_advertised(
     tmp_path: Path, serve_over_http, client_mode: str
 ) -> None:
     """The counterpart, a backend that has them, is in test_protocol_matrix_http."""
@@ -98,5 +98,4 @@ async def test_prompts_and_resources_are_not_advertised_when_the_backend_lacks_t
         capabilities = client.server_capabilities
         assert capabilities is not None
         assert capabilities.tools is not None
-        assert capabilities.prompts is None
-        assert capabilities.resources is None
+        assert capabilities.model_dump(exclude_none=True).keys() == {"tools"}

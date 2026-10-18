@@ -2,8 +2,8 @@
 
 Both are answered by the proxy itself, under its own server identity and
 protocol version, then adjusted to present the backend as it is: the backend's
-``instructions`` are passed on, and the prompts and resources capabilities are
-advertised only when the backend advertised them. The backend's values come
+``instructions`` are passed on, and a capability is advertised only when the
+backend advertised it too, tools aside. The backend's values come
 from what it negotiated on its last successful connect (``BackendMetadata``),
 never from a call to the backend, so these requests never fail on the backend's
 account and add no traffic to its queue. Before the backend's first connect the
@@ -71,17 +71,24 @@ def _present_capabilities(
     proxy: mcp_types.ServerCapabilities,
     backend: mcp_types.ServerCapabilities | None,
 ) -> mcp_types.ServerCapabilities:
-    """The proxy's capabilities, less the prompts and resources the backend lacks.
+    """The proxy's capabilities, less each one the backend did not advertise.
 
     Tools stay advertised whatever the backend has, because ``backend_status``
-    is always served. A capability the backend did not advertise would only
-    send clients to discovery that the backend answers with "Method not found".
+    is always served. Within ``experimental`` and ``extensions`` an entry stays
+    only when the backend has the same identifier. A kept capability keeps the
+    proxy's own flags: they describe what the proxy delivers to its clients.
     """
     if backend is None:
         return proxy
-    return proxy.model_copy(
-        update={
-            "prompts": proxy.prompts if backend.prompts is not None else None,
-            "resources": proxy.resources if backend.resources is not None else None,
-        }
-    )
+    update: dict[str, Any] = {}
+    for name in type(proxy).model_fields:
+        ours, theirs = getattr(proxy, name), getattr(backend, name)
+        if name == "tools" or ours is None:
+            continue
+        if isinstance(ours, dict):
+            update[name] = {
+                k: v for k, v in ours.items() if k in (theirs or {})
+            } or None
+        elif theirs is None:
+            update[name] = None
+    return proxy.model_copy(update=update)

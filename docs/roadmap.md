@@ -14,8 +14,8 @@ nothing here is a scheduled commitment, and the order changes when a real need d
 - **Both kinds of MCP protocol version** — clients on the session-based versions (up to
   2025-11-25) and on the sessionless 2026-07-28 are served side by side, and the backend's
   version is negotiated automatically, in any pairing. The proxy answers its clients'
-  handshakes itself, passing on the backend's `instructions` and offering prompts and
-  resources only when the backend has them.
+  handshakes itself, passing on the backend's `instructions` and offering only the
+  capabilities the backend has.
 - **Self-healing** — starts whether or not the backend is up, reconnects with bounded jittered
   backoff, survives backend restarts, stops promptly on `SIGTERM`.
 - **`backend_status`** tells a client whether the backend is reachable without provoking a

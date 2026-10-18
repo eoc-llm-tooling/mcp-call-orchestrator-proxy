@@ -120,7 +120,7 @@ instructions); it is what `ResilientBackend` builds per connection.
 | [`exposure.py`](src/mcp_call_orchestrator_proxy/exposure.py) | Exposure control, policy side. `resolve_policies` turns the six allow/deny settings into one policy per surface (pure: no I/O, no logging) plus the startup warnings; `apply_exposure_policy` enforces it with FastMCP's scoped `disable`/`enable` visibility on the server. |
 | [`exposure_audit.py`](src/mcp_call_orchestrator_proxy/exposure_audit.py) | `ExposureAuditBackend` — exposure control, audit side. A pass-through `MCPBackendClient` layer above the queue that compares the configured filter names with the backend's first successful listing per surface and warns once per unknown name. Filters and refuses nothing. |
 | [`server.py`](src/mcp_call_orchestrator_proxy/server.py) | `build_proxy_server` — a plain `FastMCP` server with FastMCP's `ProxyProvider` over the facade (not `FastMCPProxy`, not `create_proxy()`), so the duck-typed facade is driven as-is with exact schemas; installs `BackendMetadataMiddleware` and turns off FastMCP's `$ref` inlining (`dereference_schemas=False`). |
-| [`metadata.py`](src/mcp_call_orchestrator_proxy/metadata.py) | `BackendMetadataMiddleware` — the proxy's answer to `initialize` and `server/discover`: its own, plus the backend's `instructions`, with the prompts and resources capabilities only when the backend has them. Reads `ResilientBackend.metadata`; never calls the backend. |
+| [`metadata.py`](src/mcp_call_orchestrator_proxy/metadata.py) | `BackendMetadataMiddleware` — the proxy's answer to `initialize` and `server/discover`: its own, plus the backend's `instructions`, with only the capabilities the backend has (tools always). Reads `ResilientBackend.metadata`; never calls the backend. |
 | [`app.py`](src/mcp_call_orchestrator_proxy/app.py) | Composition root. `create_proxy_app` wires settings → resilient → orchestrator → queued facade → exposure audit → proxy server, defines the lifespan, registers the proxy-native `backend_status` tool, applies the exposure policy and logs its startup warnings. |
 
 ## Request lifecycle (a tool call)
@@ -268,9 +268,12 @@ both.
   backend's session directly, outside the queue (see `protocol_version` above).
 - **Handshake.** `BackendMetadataMiddleware` answers `initialize` and `server/discover` with
   the proxy's own server identity and protocol version, adding the backend's `instructions`
-  and leaving out the prompts and resources capabilities when the backend did not advertise
-  them — clients would otherwise run discovery the backend answers with "Method not found".
-  The tools capability stays: `backend_status` is always served. The values come from
+  and leaving out each capability the backend did not advertise (prompts, resources,
+  logging, completions, tasks), and each `experimental` or `extensions` entry whose
+  identifier the backend does not have — clients would otherwise send requests the backend
+  answers with "Method not found". A kept capability keeps the proxy's own flags, which
+  describe what the proxy delivers. The tools capability stays: `backend_status` is always
+  served. The values come from
   `ResilientBackend.metadata`; before the backend's first connect the proxy's own answer goes
   out unchanged.
 
