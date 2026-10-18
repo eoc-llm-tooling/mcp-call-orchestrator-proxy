@@ -32,6 +32,7 @@ from mcp_call_orchestrator_proxy.interfaces import MCPBackendClient
 from mcp_call_orchestrator_proxy.orchestrator import CallOrchestrator
 from mcp_call_orchestrator_proxy.resilient import (
     BackendUnavailableError,
+    MethodNotSupportedError,
     ResilientBackend,
 )
 from mcp_call_orchestrator_proxy.server import build_proxy_server
@@ -102,6 +103,9 @@ def create_proxy_app(
         # absorb, so it is a warning, not an unhandled fault. The queue itself
         # knows nothing of backends; saying so is this root's job.
         expected_errors=(BackendUnavailableError,),
+        # A backend that serves tools only answers prompts/resources discovery
+        # with "Method not found" on every client connection: routine, not a fault.
+        declined_errors=(MethodNotSupportedError,),
     )
     queued_backend = QueuedMCPBackend(resilient, orchestrator)
 

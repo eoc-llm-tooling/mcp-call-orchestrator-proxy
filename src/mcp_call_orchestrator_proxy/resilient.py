@@ -107,6 +107,16 @@ _SYNTHETIC_INIT = mcp_types.InitializeResult(
 )
 
 
+class MethodNotSupportedError(McpError):
+    """The backend answered that it does not implement the requested method.
+
+    JSON-RPC "Method not found", e.g. ``prompts/list`` on a backend that serves
+    tools only. A normal answer, not a fault. It keeps the backend's own
+    ``ErrorData``, so FastMCP's proxy still reads it as ``METHOD_NOT_FOUND`` and
+    serves an empty listing.
+    """
+
+
 class BackendUnavailableError(RuntimeError):
     """Raised when a backend operation is attempted while the backend is unreachable.
 
@@ -353,7 +363,8 @@ class ResilientBackend:
         A transport-level error (``_CONNECTION_ERRORS``) or a connection-broken
         ``McpError`` signal (``_is_connection_broken_signal``) marks the connection
         broken - which wakes the supervisor to tear down and rebuild the client -
-        and is re-raised as ``BackendUnavailableError``. Any other error is an
+        and is re-raised as ``BackendUnavailableError``. A "Method not found"
+        answer is re-raised as ``MethodNotSupportedError``. Any other error is an
         ordinary per-call failure and propagates unchanged.
         """
         try:
@@ -363,6 +374,8 @@ class ResilientBackend:
         except McpError as exc:
             if _is_connection_broken_signal(exc):
                 raise self._connection_failed(exc) from exc
+            if exc.error.code == mcp_types.METHOD_NOT_FOUND:
+                raise MethodNotSupportedError(exc.error) from exc
             raise
 
     async def ping(self) -> bool:

@@ -174,7 +174,7 @@ safely against a backend that cannot take them at once. Three levels, each with 
 | Level | Carries |
 |---|---|
 | `WARNING`+ | The backend went away; the backend came back. Nothing else. Quiet == healthy, so this level is what an alert rule watches. |
-| `INFO` | Two records per call — one on acceptance (client, op, queue depth), one on completion (queue wait, backend exec). Arrival order vs. service order, which is the readable proof the queue works. A hang appears as an acceptance with no completion. |
+| `INFO` | Two records per call — one on acceptance (client, op, queue depth), one on completion (queue wait, backend exec; for a call the backend declines, such as a method it does not implement, the completion record says so). Arrival order vs. service order, which is the readable proof the queue works. A hang appears as an acceptance with no completion. |
 | `DEBUG` | One extra record when a call actually starts running, which separates *waiting in the queue* from *at the backend, unanswered* — the two hangs that otherwise look identical. |
 
 Two structural points, both load-bearing:
@@ -187,9 +187,13 @@ Two structural points, both load-bearing:
   disconnected client's session is collected, silently merging unrelated clients in the log.
 - **What counts as "absorbed" is injected, not hard-coded.** `CallOrchestrator` takes an
   `expected_errors` tuple, logged at `WARNING` without a traceback; `app.py` passes
-  `BackendUnavailableError`. The queue cannot know which failures its owner considers routine,
-  and the composition root can — so the severity invariant above is enforced without the
-  generic layer learning about backends.
+  `BackendUnavailableError`. It also takes a `declined_errors` tuple, logged at `INFO` without a
+  traceback as the call's completion record; `app.py` passes `MethodNotSupportedError`, which
+  `ResilientBackend` raises for a backend's JSON-RPC `-32601` "Method not found" answer — what a
+  tools-only backend returns to every client's prompt and resource discovery. That error keeps
+  the backend's `ErrorData`, so FastMCP still serves an empty listing for it. The queue cannot
+  know which failures its owner considers routine, and the composition root can — so the
+  severity invariant above is enforced without the generic layer learning about backends.
 
 ## Configuration model
 
