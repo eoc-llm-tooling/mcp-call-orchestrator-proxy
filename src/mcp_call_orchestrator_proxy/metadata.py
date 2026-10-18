@@ -7,7 +7,9 @@ backend advertised it too, tools aside. The backend's values come
 from what it negotiated on its last successful connect (``BackendMetadata``),
 never from a call to the backend, so these requests never fail on the backend's
 account and add no traffic to its queue. Before the backend's first connect the
-proxy's own answer goes out unchanged.
+proxy's own answer goes out unchanged: a client keeps the capabilities it was
+given, and an unneeded one costs it at most an empty listing, where a missing
+one would hide the backend's prompts and resources for its whole session.
 """
 
 from __future__ import annotations

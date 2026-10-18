@@ -275,7 +275,11 @@ both.
   describe what the proxy delivers. The tools capability stays: `backend_status` is always
   served. The values come from
   `ResilientBackend.metadata`; before the backend's first connect the proxy's own answer goes
-  out unchanged.
+  out unchanged, with every capability the proxy has. The proxy routinely starts before its
+  backend, so clients often connect in that window, and a client keeps the capabilities it
+  was given for its whole session: an unneeded capability costs it at most an empty listing
+  (a backend's "Method not found" is logged at `INFO`), while a missing one would hide the
+  backend's prompts and resources from it for good.
 
 ## Configuration model
 
