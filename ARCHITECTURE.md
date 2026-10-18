@@ -112,7 +112,7 @@ instructions); it is what `ResilientBackend` builds per connection.
 |---|---|
 | [`cli.py`](src/mcp_call_orchestrator_proxy/cli.py) | Typer CLI (`run` subcommand). Maps flags to setting overrides, configures logging, turns off FastMCP's update check, then runs the app over stdio or Streamable HTTP. CLI flags win over env vars. |
 | [`config.py`](src/mcp_call_orchestrator_proxy/config.py) | `ProxySettings` (pydantic-settings, `MCP_PROXY_` prefix). Validates that a backend source is configured. |
-| [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant and refuses FastMCP's transform keys, both at startup; forces `keep_alive=False` on a stdio transport; resolves a human-readable backend URL. |
+| [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant and refuses FastMCP's transform keys, both at startup; forces `keep_alive=False` on a stdio transport; gives a streamable-HTTP backend's client a read timeout longer than the call timeout; resolves a human-readable backend URL. |
 | [`interfaces.py`](src/mcp_call_orchestrator_proxy/interfaces.py) | `MCPBackendClient` Protocol — the structural contract every layer implements — and `NegotiatedBackendClient`, which adds what a connected client negotiated. |
 | [`resilient.py`](src/mcp_call_orchestrator_proxy/resilient.py) | `ResilientBackend` — owns the one live connection and a background supervisor that keeps it healthy across backend restarts. Sits *below* the orchestrator, so it never adds concurrency. Records what the backend negotiated (`BackendMetadata`) on each connect. Sources `backend_status`. |
 | [`orchestrator.py`](src/mcp_call_orchestrator_proxy/orchestrator.py) | `CallOrchestrator` — MCP-agnostic queue. A single dispatcher pulls FIFO and runs each call as its own task, gated by a semaphore; each call is independently timed out so one hang can't wedge the queue. |
@@ -174,6 +174,14 @@ instructions); it is what `ResilientBackend` builds per connection.
   unknown, failed or timed-out tool call also raises `MCPError` (a timeout with the same
   `-32001` code), and treating the whole class as a break would tear the connection down on an
   ordinary error.
+- **A timed-out call fails alone.** A call that outlasts `call_timeout_seconds` fails on the
+  MCP request timeout, which ends that one request, and the connection stays live for the
+  calls queued behind it. The backend's streamable-HTTP client reads for
+  `call_timeout_seconds` plus 5 s for this reason (`client.py::_http_client_factory`):
+  `fastmcp.Client` otherwise sets the HTTP read timeout to the call timeout, and when the read
+  timeout fires first on a 2026-07-28 connection, whose answers are not streamed, the MCP SDK's
+  transport fails as a whole and ends the connection. A timeout is a per-call failure, not a
+  break.
 - **Bounded, jittered backoff.** Delay grows from `reconnect_initial_backoff_seconds` by
   `reconnect_backoff_multiplier` up to `reconnect_max_backoff_seconds`, with ±20% jitter so
   retries don't lock-step. It never hammers a down endpoint.

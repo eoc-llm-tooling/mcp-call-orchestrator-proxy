@@ -290,13 +290,46 @@ async def test_a_hung_backend_call_does_not_wedge_the_queue(
         with pytest.raises(Exception):  # noqa: B017 - any error, as long as it is one
             await asyncio.wait_for(client.call_tool("hang", {}), timeout=20.0)
 
-        # The queue is still usable. A hang can break the backend connection (a
-        # call that never answered is indistinguishable from a dead one; over
-        # HTTP the transport's read timeout ends the connection just after the
-        # call's own timeout), so give the supervisor its moment to rebuild it
-        # before insisting the queue works.
-        echoed = await echo_once_served(client, "after the hang")
+        # The queue is still usable, on the connection the hung call ran on.
+        echoed = await client.call_tool("echo", {"value": "after the hang"})
         assert echoed.content[0].text == "after the hang"
+
+
+@pytest.mark.asyncio
+@BACKEND_KINDS
+async def test_a_call_queued_behind_a_hung_call_completes(
+    spawn_backend, backend_config_file, serve_over_http, backend_legacy: bool
+) -> None:
+    """OCP-N-002 as its acceptance states it: a tool that never returns fails at
+    the timeout, and a call queued behind it completes - first time, no retry.
+
+    The second client's call waits in the queue while the hung call holds the
+    only slot, so it reaches the backend just as the hung call is timed out:
+    the timeout must fail that call alone and leave the connection live.
+    """
+    backend = spawn_backend(legacy=backend_legacy)
+    settings = ProxySettings(
+        backend_config=backend_config_file(backend.url),
+        call_timeout_seconds=2.0,
+        **_RESILIENCE_TUNING,
+    )
+    proxy_app = create_proxy_app(settings=settings)
+
+    async with (
+        serve_over_http(proxy_app.mcp) as url,
+        Client(url) as hanging,
+        Client(url) as queued,
+    ):
+        hung = asyncio.create_task(hanging.call_tool("hang", {}, raise_on_error=False))
+        await asyncio.sleep(0.5)
+        echoed = await queued.call_tool(
+            "echo", {"value": "queued behind the hang"}, raise_on_error=False
+        )
+        hung_result = await asyncio.wait_for(hung, timeout=20.0)
+
+    assert hung_result.is_error, "the hung call did not fail at the timeout"
+    assert not echoed.is_error, f"the queued call failed: {echoed.content}"
+    assert echoed.content[0].text == "queued behind the hang"
 
 
 @pytest.mark.asyncio

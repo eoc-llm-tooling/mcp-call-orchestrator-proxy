@@ -139,7 +139,7 @@ these instead. `MCP_PROXY_BACKEND_API_KEY` is required in this mode.
 | `MCP_PROXY_LISTEN_HOST` | `127.0.0.1` | Host the proxy itself binds to. |
 | `MCP_PROXY_LISTEN_PORT` | `27125` | Port the proxy itself listens on. |
 | `MCP_PROXY_MAX_CONCURRENT_CALLS` | `1` | Concurrent calls allowed to the backend (`1` = fully serialized). |
-| `MCP_PROXY_CALL_TIMEOUT_SECONDS` | `120` | Timeout for a single backend tool call. |
+| `MCP_PROXY_CALL_TIMEOUT_SECONDS` | `120` | Timeout for a single backend tool call. A call that exceeds it fails alone; the calls queued behind it still run. |
 | `MCP_PROXY_CONNECT_TIMEOUT_SECONDS` | `30` | Timeout for a single backend connect attempt, protocol negotiation included. |
 | `MCP_PROXY_RECONNECT_INITIAL_BACKOFF_SECONDS` | `1` | First delay before retrying a failed connection. |
 | `MCP_PROXY_RECONNECT_MAX_BACKOFF_SECONDS` | `30` | Cap on the exponential reconnect backoff. |
