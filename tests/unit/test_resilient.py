@@ -40,6 +40,10 @@ class BackendController:
         self.connect_ok = True
         self.tool_error: Exception | None = None
         self.instructions: str | None = "BACKEND INSTRUCTIONS"
+        self.protocol_version = "2026-07-28"
+        self.capabilities = mcp_types.ServerCapabilities(
+            tools=mcp_types.ToolsCapability()
+        )
         self.built: list[FakeClient] = []
 
     def __call__(self) -> NegotiatedBackendClient:
@@ -55,6 +59,7 @@ class FakeClient:
         self._controller = controller
         self.entered = False
         self.exited = False
+        self.listings = 0
 
     async def __aenter__(self) -> FakeClient:
         if not self._controller.connect_ok:
@@ -70,17 +75,18 @@ class FakeClient:
 
     @property
     def protocol_version(self) -> str | None:
-        return "2026-07-28" if self.is_connected() else None
+        return self._controller.protocol_version if self.is_connected() else None
 
     @property
     def server_capabilities(self) -> mcp_types.ServerCapabilities | None:
-        return mcp_types.ServerCapabilities(tools=mcp_types.ToolsCapability())
+        return self._controller.capabilities
 
     @property
     def instructions(self) -> str | None:
         return self._controller.instructions
 
     async def list_tools(self) -> list[mcp_types.Tool]:
+        self.listings += 1
         return [
             mcp_types.Tool(
                 name="echo",
@@ -201,6 +207,36 @@ async def test_records_what_the_backend_negotiated_and_keeps_it_while_down() -> 
             lambda: backend.status_snapshot()["consecutive_failures"] >= 1
         )
         assert backend.metadata == connected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("protocol_version", "has_tools", "listings"),
+    [("2026-07-28", True, 1), ("2025-11-25", True, 0), ("2026-07-28", False, 0)],
+    ids=["2026-with-tools", "2025", "2026-without-tools"],
+)
+async def test_a_new_2026_connection_lists_the_tools_before_it_serves(
+    protocol_version: str, has_tools: bool, listings: int
+) -> None:
+    """A 2026-07-28 client sends a tool's header arguments only for tools it has
+    listed, and FastMCP's tool cache outlives a reconnect: each new connection
+    lists them once, before any call can use it."""
+    controller = BackendController()
+    controller.protocol_version = protocol_version
+    if not has_tools:
+        controller.capabilities = mcp_types.ServerCapabilities()
+
+    async with _make_backend(controller) as backend:
+        assert await _wait_until(lambda: backend.status_snapshot()["connected"] is True)
+        assert controller.built[-1].listings == listings
+
+        controller.tool_error = RuntimeError("Server session was closed unexpectedly")
+        with pytest.raises(BackendUnavailableError):
+            await backend.call_tool_mcp("echo", {"value": "x"})
+        controller.tool_error = None
+        assert await _wait_until(lambda: len(controller.built) > 1)
+        assert await _wait_until(lambda: backend.status_snapshot()["connected"] is True)
+        assert controller.built[-1].listings == listings
 
 
 def test_reports_no_protocol_version_to_the_layers_above() -> None:

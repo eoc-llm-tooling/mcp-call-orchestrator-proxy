@@ -273,6 +273,42 @@ async def test_proxy_serves_again_after_a_backend_restart_it_did_not_see(
 
 
 @pytest.mark.asyncio
+async def test_a_tool_with_a_header_argument_is_served_after_a_reconnect(
+    spawn_backend, backend_config_file, serve_over_http
+) -> None:
+    """A 2026-07-28 backend rejects a call to ``header_echo`` that lacks its
+    ``Mcp-Param-Region`` header, and the proxy's new connection sends that header
+    only for a tool it has listed. The client here speaks 2025-11-25, so nothing
+    on its side makes the proxy list tools before the call; FastMCP's tool cache
+    is still fresh after the reconnect."""
+    backend = spawn_backend()
+    settings = ProxySettings(
+        backend_config=backend_config_file(backend.url), **_RESILIENCE_TUNING
+    )
+    proxy_app = create_proxy_app(settings=settings)
+
+    async with (
+        serve_over_http(proxy_app.mcp) as url,
+        Client(url, mode="legacy") as client,
+    ):
+        echoed = await client.call_tool("header_echo", {"region": "before"})
+        assert echoed.content[0].text == "before"
+
+        backend.kill()
+        with pytest.raises(Exception):  # noqa: B017 - the call must fail; how is not the point
+            await client.call_tool("echo", {"value": "during"})
+        await wait_for_connected(client, expected=False)
+        backend.start()
+        await wait_for_connected(client, expected=True)
+
+        echoed = await client.call_tool(
+            "header_echo", {"region": "after"}, raise_on_error=False
+        )
+        assert not echoed.is_error, echoed.content
+        assert echoed.content[0].text == "after"
+
+
+@pytest.mark.asyncio
 async def test_a_hung_backend_call_does_not_wedge_the_queue(
     spawn_backend, backend_config_file, serve_over_http
 ) -> None:

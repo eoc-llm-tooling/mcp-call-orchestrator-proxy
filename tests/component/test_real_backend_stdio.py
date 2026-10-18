@@ -92,6 +92,7 @@ async def test_proxy_fronts_a_real_stdio_backend_with_exact_schema_parity(
         tools = {t.name for t in await client.list_tools()}
         assert tools == {
             "echo",
+            "header_echo",
             "slow_echo",
             "hang",
             "call_stats",

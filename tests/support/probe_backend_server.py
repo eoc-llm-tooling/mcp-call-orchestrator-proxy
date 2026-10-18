@@ -23,7 +23,9 @@ pid, so a test can tell whether a reconnect actually replaced the process),
 test can see exactly what reached the child).
 
 It declares server instructions (``INSTRUCTIONS``), so a test can see whether
-they reach the proxy's clients.
+they reach the proxy's clients, and ``header_echo``, whose argument is declared
+for an ``Mcp-Param-*`` HTTP header (``x-mcp-header``): on 2026-07-28 the server
+rejects a call to it that does not carry the header.
 
 Run as a script; it either binds the loopback port it is given and serves
 Streamable HTTP on it, or serves over stdio::
@@ -46,12 +48,13 @@ import contextlib
 import os
 import socket
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import FastMCP
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from mcp import MCPError
 from mcp import types as mcp_types
+from pydantic import Field
 
 INSTRUCTIONS = "PROBE BACKEND INSTRUCTIONS"
 
@@ -112,6 +115,14 @@ def build_server(*, legacy: bool = False) -> FastMCP:
         """Echo the given value back verbatim."""
         async with stats.in_flight():
             return value
+
+    @mcp.tool
+    async def header_echo(
+        region: Annotated[str, Field(json_schema_extra={"x-mcp-header": "Region"})],
+    ) -> str:
+        """Echo the given value back verbatim; it travels as a header too."""
+        async with stats.in_flight():
+            return region
 
     @mcp.tool
     async def slow_echo(value: str, delay_seconds: float = 0.2) -> str:

@@ -148,8 +148,12 @@ the Protocol with what a connected client negotiated (capabilities, instructions
 
 - **Connect → hold → break → back off → retry, forever.** Entering a fresh client negotiates
   the protocol version (see [Protocol versions](#protocol-versions)); the supervisor then
-  records what the backend negotiated (`metadata`) and marks itself live. `_hold` keeps the connection until `_broken` or
-  `_shutdown` fires, re-checking a local `is_connected()` each `backend_health_poll_seconds`
+  records what the backend negotiated (`metadata`) and marks itself live. On a 2026-07-28
+  connection to a backend with tools it first lists them, once: a 2026-07-28 client sends a
+  tool's `x-mcp-header` arguments as `Mcp-Param-*` HTTP headers only for tools it has listed
+  itself, the backend rejects a call without them, and FastMCP's tool cache outlives the
+  reconnect, so nothing else would list them on the new connection. `_hold` keeps the
+  connection until `_broken` or `_shutdown` fires, re-checking a local `is_connected()` each `backend_health_poll_seconds`
   (no backend traffic).
 - **What counts as a break.** A delegated call that fails with a transport-level error
   (`_CONNECTION_ERRORS`), or with an `MCPError` that means "the session is gone, not just this

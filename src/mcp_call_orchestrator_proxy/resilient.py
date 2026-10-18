@@ -45,6 +45,7 @@ import anyio
 import httpx2
 from mcp import MCPError
 from mcp import types as mcp_types
+from mcp.types.version import MODERN_PROTOCOL_VERSIONS
 
 from mcp_call_orchestrator_proxy.interfaces import (
     MCPBackendClient,
@@ -105,6 +106,22 @@ def _is_connection_broken_signal(exc: BaseException) -> bool:
     if exc.error.code == _CONNECTION_CLOSED_CODE:
         return True
     return (exc.error.code, exc.error.message) in _SESSION_GONE_SIGNALS
+
+
+def _lists_tools_for_headers(client: NegotiatedBackendClient) -> bool:
+    """Whether a new connection must list the backend's tools before serving.
+
+    On 2026-07-28 a client sends a tool's ``x-mcp-header`` arguments as
+    ``Mcp-Param-*`` HTTP headers only for tools it has listed itself, and the
+    backend rejects a call without them. FastMCP's tool cache outlives a
+    reconnect, so nothing else would list them on the new connection.
+    """
+    capabilities = client.server_capabilities
+    return (
+        client.protocol_version in MODERN_PROTOCOL_VERSIONS
+        and capabilities is not None
+        and capabilities.tools is not None
+    )
 
 
 @dataclass(frozen=True)
@@ -244,6 +261,8 @@ class ResilientBackend:
                         capabilities=client.server_capabilities,
                         instructions=client.instructions,
                     )
+                    if _lists_tools_for_headers(client):
+                        await client.list_tools()
                     self._live = client
                     self._connected_since = _utcnow()
                     failures = self._consecutive_failures
