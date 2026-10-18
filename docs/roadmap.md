@@ -7,8 +7,12 @@ nothing here is a scheduled commitment, and the order changes when a real need d
 
 - **Exact parity** with the backend's tools, resources and prompts — real names, original
   schemas with their `$ref`s and `$defs` as the backend wrote them, nothing hand-synced.
-- **Calls are serialized** through one FIFO queue with a configurable limit (default `1`) and
-  a per-call timeout, so a single hung call can't wedge the rest.
+- **Calls are serialized** through one FIFO queue with a configurable limit (default `1`). One
+  timeout bounds a call's wait in the queue and its backend call, each from its own start, so a
+  single hung call can't wedge the rest, and a call whose client gave up before it started never
+  reaches the backend.
+- **Results are relayed as the backend sent them**, a result that does not match the tool's own
+  output schema included; the clients check what they receive.
 - **Multi-client safe** — independent clients connect over HTTP at once without cross-talk;
   the proxy is the backend's only client.
 - **Both kinds of MCP protocol version** — clients on the session-based versions (up to
@@ -23,8 +27,8 @@ nothing here is a scheduled commitment, and the order changes when a real need d
 - Runs as a **`systemd --user` service**, or under a **per-user `supervisord`** where systemd
   user services are unavailable; configured by env vars or a standard `mcpServers` JSON file.
 - **Fronts stdio backends too** — a backend started as a child process (`command`/`args`/`env`/
-  `cwd` in the `mcpServers` config) gets the same serialization, session termination, schema
-  parity and resilience as an HTTP backend. The proxy owns that subprocess's whole life: starts
+  `cwd` in the `mcpServers` config) gets the same serialization, schema parity and resilience
+  as an HTTP backend. The proxy owns that subprocess's whole life: starts
   it on connect, keeps it across reconnects, and kills it on break or shutdown — no orphaned
   child left behind. An entry with FastMCP's transform keys (`tools`, `include_tags`,
   `exclude_tags`), which would put a nested proxy in front of the subprocess, is refused at
@@ -38,47 +42,8 @@ nothing here is a scheduled commitment, and the order changes when a real need d
 
 ## Next
 
-The next releases, in order. Each issue is merged and verified on its own; the milestone
-holds the release's issues.
-
-### v0.4.3 Safety fixes
-
-Defects in released behaviour where a documented guarantee fails, a fresh install breaks, or the
-log is mis-leveled. No new behaviour.
-
-- [#1] — a backend config entry with FastMCP transform keys bypasses the stdio `keep_alive`
-  override and the TLS setting. The fix rejects those keys at startup until v0.6.0 honours the
-  safe subset.
-- [#2] — the `fastmcp`/`mcp` ranges have no upper bound, so a fresh resolution installs
-  versions the proxy cannot import. The fix caps them below the next major.
-- [#3] — a backend without prompts or resources logs an ERROR with a traceback on every
-  client's capability discovery.
-- [#4] — tool schemas reach clients with `$ref` inlined, so their structure differs from the
-  backend's.
-
-### v0.5.0 FastMCP 4
-
-FastMCP 4 brings MCP SDK 2 and the sessionless 2026-07-28 protocol version.
-
-- [#5] — serve current MCP protocol versions on FastMCP 4: both protocol versions on the
-  client side and on the backend side, a server layer of the proxy's own in place of
-  `FastMCPProxy`, and the docs brought up to date. Depends on [#2].
-- [#6] — the backend's server `instructions` are not forwarded to clients. Closed by [#5].
-
-### v0.5.1 Queue fixes
-
-Defects in released behaviour where one client's call costs the other clients: a broken
-connection, or an operation on the backend's queue that no client asked for. No new behaviour.
-
-- [#20] — a tool result that does not match the tool's declared output schema tears down the
-  backend connection under every other client's calls, and the caller gets an outage error
-  instead of the result.
-- [#21] — a 2026-07-28 client's tool call with arguments puts an extra `tools/list` on the
-  backend's queue, logged as that client's.
-- [#23] — a queued call's timeout counts its wait in the queue, and a call whose caller has
-  already received the timeout error still runs at the backend.
-
-## Later
+The next release. Each issue is merged and verified on its own; the milestone holds the release's
+issues.
 
 ### v0.6.0 Description overrides
 
@@ -90,6 +55,8 @@ structure stay exact.
 - [#8] — honour the safe subset of FastMCP's `"tools"` key in the backend config, as text
   overrides and exposure-control entries; reject the rest at startup. Depends on [#1] and
   [#7].
+- [#24] — a tool call made more than 300 s after the last tool listing puts a `tools/list` on
+  the backend's queue, logged as that client's.
 
 ---
 
@@ -149,13 +116,7 @@ Ideas without an issue or a release.
 - **Publishing to a package index.** Deployment recipes, yes; distribution, no.
 
 [#1]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/1
-[#2]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/2
-[#3]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/3
-[#4]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/4
 [#5]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/5
-[#6]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/6
 [#7]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/7
 [#8]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/8
-[#20]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/20
-[#21]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/21
-[#23]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/23
+[#24]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/24
