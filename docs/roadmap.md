@@ -9,8 +9,13 @@ nothing here is a scheduled commitment, and the order changes when a real need d
   schemas with their `$ref`s and `$defs` as the backend wrote them, nothing hand-synced.
 - **Calls are serialized** through one FIFO queue with a configurable limit (default `1`) and
   a per-call timeout, so a single hung call can't wedge the rest.
-- **Multi-session safe** — independent clients connect over HTTP at once without cross-talk;
-  sessions terminate at the proxy.
+- **Multi-client safe** — independent clients connect over HTTP at once without cross-talk;
+  the proxy is the backend's only client.
+- **Both kinds of MCP protocol version** — clients on the session-based versions (up to
+  2025-11-25) and on the sessionless 2026-07-28 are served side by side, and the backend's
+  version is negotiated automatically, in any pairing. The proxy answers its clients'
+  handshakes itself, passing on the backend's `instructions` and offering prompts and
+  resources only when the backend has them.
 - **Self-healing** — starts whether or not the backend is up, reconnects with bounded jittered
   backoff, survives backend restarts, stops promptly on `SIGTERM`.
 - **`backend_status`** tells a client whether the backend is reachable without provoking a
@@ -53,8 +58,7 @@ log is mis-leveled. No new behaviour.
 
 ### v0.5.0 FastMCP 4
 
-FastMCP 4 brings MCP SDK 2 and the sessionless 2026-07-28 protocol version. On it the current
-proxy does not import, cannot connect to a healthy backend, and fails every client handshake.
+FastMCP 4 brings MCP SDK 2 and the sessionless 2026-07-28 protocol version.
 
 - [#5] — serve current MCP protocol versions on FastMCP 4: both protocol versions on the
   client side and on the backend side, a server layer of the proxy's own in place of

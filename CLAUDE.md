@@ -16,8 +16,8 @@ Orientation for agents working in this repository. Keep it short; the deeper mat
 
 `mcp-call-orchestrator-proxy` is a **resilient, session-terminating, call-serializing MCP
 proxy** in front of a *single* backend MCP server. It makes a backend that can't handle
-concurrent clients safe for several at once: each client's session terminates at the proxy,
-calls to the backend are queued (default: fully serialized), and the connection self-heals
+concurrent clients safe for several at once: the proxy is the backend's only client, whatever
+MCP protocol version each client and the backend speak, calls to the backend are queued (default: fully serialized), and the connection self-heals
 when the backend comes and goes. The backend's tools are mirrored with **exact schema
 parity**, plus one added `backend_status` tool. Treat it as backend-agnostic: nothing in the
 code or the shipped artifacts may presume a particular backend product.
@@ -41,10 +41,14 @@ code or the shipped artifacts may presume a particular backend product.
 One process, one backend connection, one queue. Every backend-facing call flows:
 
 ```
-client → FastMCPProxy (server.py) → ExposureAuditBackend (exposure_audit.py)
+client → FastMCP + ProxyProvider (server.py) → ExposureAuditBackend (exposure_audit.py)
        → QueuedMCPBackend (backend.py) → CallOrchestrator (orchestrator.py)
        → ResilientBackend (resilient.py) → real fastmcp.Client (client.py) → backend MCP server
 ```
+
+A client's `initialize` and `server/discover` never go down that chain:
+`BackendMetadataMiddleware` (`metadata.py`) answers them from what `ResilientBackend` last
+negotiated with the backend.
 
 Exposure control is two modules: `exposure.py` resolves the allow/deny settings and enforces
 them as FastMCP visibility on the server; `exposure_audit.py` is the pass-through layer above
@@ -96,11 +100,16 @@ it before adding a test rather than copying the nearest existing one.
 
 - **Exactly one backend.** A config with 2+ servers is rejected on purpose — a composite mount
   would prefix tool names (`{server}_{tool}`) and break schema parity.
-- **`FastMCPProxy` is constructed directly**, not via `create_proxy()`. `create_proxy()` would
-  treat our queue-aware facade as a raw transport and wrap it in a fresh client. See the
-  comment in `server.py`.
-- **`initialize()` never raises when the backend is down** ("stay connectable, degrade") — clients
-  must always be able to handshake with the proxy. Don't "fix" this into raising.
+- **The server is a plain `FastMCP` with `ProxyProvider`**, not `FastMCPProxy` and not
+  `create_proxy()`. `create_proxy()` would wrap our queue-aware facade in a fresh client, and
+  `FastMCPProxy`'s metadata middleware calls the backend on every handshake, outside the queue.
+  See the docstring in `server.py`.
+- **Every proxy layer reports `protocol_version` as `None`.** Don't pass the backend's real
+  version up: for a 2026-07-28 version `ProxyProvider` calls the backend's session directly and
+  bypasses the queue.
+- **The proxy answers `initialize` and `server/discover` itself** ("stay connectable,
+  degrade") — never by calling the backend, so a handshake neither fails nor queues. Don't
+  forward them to the backend.
 - **`WARNING` is for outages, recoveries and what only the operator can fix** (a misconfigured
   exposure filter, a call the backend never answered). Log a degradation the proxy absorbs by
   design below `WARNING`.

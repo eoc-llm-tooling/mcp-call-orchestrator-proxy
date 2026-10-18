@@ -29,7 +29,7 @@ from mcp_call_orchestrator_proxy.exposure import (
     resolve_policies,
 )
 from mcp_call_orchestrator_proxy.exposure_audit import ExposureAuditBackend
-from mcp_call_orchestrator_proxy.interfaces import MCPBackendClient
+from mcp_call_orchestrator_proxy.interfaces import NegotiatedBackendClient
 from mcp_call_orchestrator_proxy.orchestrator import CallOrchestrator
 from mcp_call_orchestrator_proxy.resilient import (
     BackendUnavailableError,
@@ -47,13 +47,13 @@ class ProxyApp:
 
     mcp: FastMCP
     orchestrator: CallOrchestrator
-    backend_client: MCPBackendClient
+    backend_client: ResilientBackend
 
 
 def create_proxy_app(
     settings: ProxySettings | None = None,
-    backend_client: MCPBackendClient | None = None,
-    backend_factory: Callable[[], MCPBackendClient] | None = None,
+    backend_client: NegotiatedBackendClient | None = None,
+    backend_factory: Callable[[], NegotiatedBackendClient] | None = None,
 ) -> ProxyApp:
     """Build a fully wired proxy application. Performs no network I/O.
 
@@ -75,19 +75,19 @@ def create_proxy_app(
     settings = settings or get_settings()
     check_backend_config(settings)
 
-    resolved_factory: Callable[[], MCPBackendClient]
+    resolved_factory: Callable[[], NegotiatedBackendClient]
     if backend_factory is not None:
         resolved_factory = backend_factory
     elif backend_client is not None:
         injected = backend_client
 
-        def _reuse_factory() -> MCPBackendClient:
+        def _reuse_factory() -> NegotiatedBackendClient:
             return injected
 
         resolved_factory = _reuse_factory
     else:
 
-        def _real_factory() -> MCPBackendClient:
+        def _real_factory() -> NegotiatedBackendClient:
             return build_real_backend_client(settings)
 
         resolved_factory = _real_factory
@@ -135,6 +135,7 @@ def create_proxy_app(
 
     mcp = build_proxy_server(
         lambda: audit_backend,
+        metadata=lambda: resilient.metadata,
         server_name=settings.server_name,
         lifespan=_lifespan,
     )

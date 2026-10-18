@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Annotated, Any, Literal
 
+import fastmcp
 import typer
 
 from mcp_call_orchestrator_proxy.app import create_proxy_app
@@ -46,6 +47,16 @@ def _configure_logging(level: LogLevel) -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     logging.getLogger("mcp_call_orchestrator_proxy").setLevel(level)
+
+
+def _disable_update_check() -> None:
+    """Stop FastMCP from asking pypi.org for a newer release when it starts.
+
+    FastMCP runs that check with its startup banner. The proxy is a local
+    service, so it makes no outbound call of its own; the process entry point
+    owns this library-wide setting, as it owns the logging configuration.
+    """
+    fastmcp.settings.check_for_updates = "off"
 
 
 @app.command()
@@ -108,6 +119,7 @@ def run(
 
     settings = get_settings(**overrides)
     _configure_logging(settings.log_level)
+    _disable_update_check()
 
     proxy_app = create_proxy_app(settings=settings)
 

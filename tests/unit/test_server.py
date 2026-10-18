@@ -43,22 +43,28 @@ class FakeBackend:
     async def __aexit__(self, *exc: object) -> None:
         return None
 
-    async def initialize(self) -> mcp_types.InitializeResult:
-        return mcp_types.InitializeResult(
-            protocolVersion="2025-06-18",
-            capabilities=mcp_types.ServerCapabilities(),
-            serverInfo=mcp_types.Implementation(name="fake", version="0"),
-        )
+    @property
+    def protocol_version(self) -> str | None:
+        return "2025-11-25"
 
-    async def ping(self) -> bool:
-        return True
+    @property
+    def server_info(self) -> mcp_types.Implementation | None:
+        return mcp_types.Implementation(name="fake", version="0")
+
+    @property
+    def server_capabilities(self) -> mcp_types.ServerCapabilities | None:
+        return mcp_types.ServerCapabilities(tools=mcp_types.ToolsCapability())
+
+    @property
+    def instructions(self) -> str | None:
+        return None
 
     async def list_tools(self) -> list[mcp_types.Tool]:
         return [
             mcp_types.Tool(
                 name="vault_read",
                 description="Read a vault file's content and metadata.",
-                inputSchema=VAULT_READ_SCHEMA,
+                input_schema=VAULT_READ_SCHEMA,
             )
         ]
 
@@ -79,14 +85,20 @@ class FakeBackend:
     async def list_resource_templates(self) -> list[mcp_types.ResourceTemplate]:
         return []
 
-    async def read_resource(self, uri: str) -> list[Any]:
-        return []
+    async def read_resource_mcp(
+        self, uri: str, meta: dict[str, Any] | None = None
+    ) -> mcp_types.ReadResourceResult:
+        return mcp_types.ReadResourceResult(contents=[])
 
     async def list_prompts(self) -> list[mcp_types.Prompt]:
         return []
 
     async def get_prompt(
-        self, name: str, arguments: dict[str, Any] | None = None
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> mcp_types.GetPromptResult:
         return mcp_types.GetPromptResult(messages=[])
 
@@ -112,7 +124,7 @@ async def test_proxy_exposes_exact_upstream_schema(
     assert by_name == {"vault_read", "backend_status"}
 
     vault_read = next(t for t in tools if t.name == "vault_read")
-    assert vault_read.inputSchema == VAULT_READ_SCHEMA
+    assert vault_read.input_schema == VAULT_READ_SCHEMA
 
 
 @pytest.mark.asyncio
@@ -126,8 +138,8 @@ async def test_proxy_reports_its_configured_server_name() -> None:
     proxy_app = create_proxy_app(settings=settings, backend_client=FakeBackend())
 
     async with Client(proxy_app.mcp) as client:
-        assert client.initialize_result is not None
-        assert client.initialize_result.serverInfo.name == "example-proxy"
+        assert client.server_info is not None
+        assert client.server_info.name == "example-proxy"
 
 
 @pytest.mark.asyncio

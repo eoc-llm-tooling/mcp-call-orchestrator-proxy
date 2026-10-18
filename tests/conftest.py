@@ -45,7 +45,7 @@ import pytest
 from fastmcp import FastMCP
 from mcp import types as mcp_types
 
-from mcp_call_orchestrator_proxy.interfaces import MCPBackendClient
+from mcp_call_orchestrator_proxy.interfaces import NegotiatedBackendClient
 
 PROBE_BACKEND_SERVER = Path(__file__).parent / "support" / "probe_backend_server.py"
 
@@ -120,7 +120,7 @@ class ConcurrencyObserver:
     instrumented, since that is the operation the serializer must protect.
     """
 
-    def __init__(self, inner: MCPBackendClient) -> None:
+    def __init__(self, inner: NegotiatedBackendClient) -> None:
         self._inner = inner
         self.active = 0
         self.max_active = 0
@@ -136,11 +136,21 @@ class ConcurrencyObserver:
     ) -> None:
         await self._inner.__aexit__(exc_type, exc_val, exc_tb)
 
-    async def initialize(self) -> mcp_types.InitializeResult:
-        return await self._inner.initialize()
+    @property
+    def protocol_version(self) -> str | None:
+        return self._inner.protocol_version
 
-    async def ping(self) -> bool:
-        return await self._inner.ping()
+    @property
+    def server_info(self) -> mcp_types.Implementation | None:
+        return self._inner.server_info
+
+    @property
+    def server_capabilities(self) -> mcp_types.ServerCapabilities | None:
+        return self._inner.server_capabilities
+
+    @property
+    def instructions(self) -> str | None:
+        return self._inner.instructions
 
     async def list_tools(self) -> list[mcp_types.Tool]:
         return await self._inner.list_tools()
@@ -168,18 +178,22 @@ class ConcurrencyObserver:
     async def list_resource_templates(self) -> list[mcp_types.ResourceTemplate]:
         return await self._inner.list_resource_templates()
 
-    async def read_resource(
-        self, uri: str
-    ) -> list[mcp_types.TextResourceContents | mcp_types.BlobResourceContents]:
-        return await self._inner.read_resource(uri)
+    async def read_resource_mcp(
+        self, uri: str, meta: dict[str, Any] | None = None
+    ) -> mcp_types.ReadResourceResult:
+        return await self._inner.read_resource_mcp(uri, meta=meta)
 
     async def list_prompts(self) -> list[mcp_types.Prompt]:
         return await self._inner.list_prompts()
 
     async def get_prompt(
-        self, name: str, arguments: dict[str, Any] | None = None
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> mcp_types.GetPromptResult:
-        return await self._inner.get_prompt(name, arguments)
+        return await self._inner.get_prompt(name, arguments, meta=meta)
 
 
 ECHO_SCHEMA = {
@@ -211,22 +225,28 @@ class EchoBackend:
     async def __aexit__(self, *exc: object) -> None:
         return None
 
-    async def initialize(self) -> mcp_types.InitializeResult:
-        return mcp_types.InitializeResult(
-            protocolVersion="2025-06-18",
-            capabilities=mcp_types.ServerCapabilities(),
-            serverInfo=mcp_types.Implementation(name="echo", version="0"),
-        )
+    @property
+    def protocol_version(self) -> str | None:
+        return "2025-11-25"
 
-    async def ping(self) -> bool:
-        return True
+    @property
+    def server_info(self) -> mcp_types.Implementation | None:
+        return mcp_types.Implementation(name="echo", version="0")
+
+    @property
+    def server_capabilities(self) -> mcp_types.ServerCapabilities | None:
+        return mcp_types.ServerCapabilities(tools=mcp_types.ToolsCapability())
+
+    @property
+    def instructions(self) -> str | None:
+        return None
 
     async def list_tools(self) -> list[mcp_types.Tool]:
         return [
             mcp_types.Tool(
                 name="echo",
                 description="Echo the given value back verbatim.",
-                inputSchema=ECHO_SCHEMA,
+                input_schema=ECHO_SCHEMA,
             )
         ]
 
@@ -249,16 +269,20 @@ class EchoBackend:
     async def list_resource_templates(self) -> list[mcp_types.ResourceTemplate]:
         return []
 
-    async def read_resource(
-        self, uri: str
-    ) -> list[mcp_types.TextResourceContents | mcp_types.BlobResourceContents]:
-        return []
+    async def read_resource_mcp(
+        self, uri: str, meta: dict[str, Any] | None = None
+    ) -> mcp_types.ReadResourceResult:
+        return mcp_types.ReadResourceResult(contents=[])
 
     async def list_prompts(self) -> list[mcp_types.Prompt]:
         return []
 
     async def get_prompt(
-        self, name: str, arguments: dict[str, Any] | None = None
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> mcp_types.GetPromptResult:
         return mcp_types.GetPromptResult(messages=[])
 
@@ -272,8 +296,9 @@ class SpawnedBackend:
     connection details unchanged throughout.
     """
 
-    def __init__(self, port: int) -> None:
+    def __init__(self, port: int, *, legacy: bool = False) -> None:
         self.port = port
+        self.legacy = legacy
         self.url = f"http://127.0.0.1:{port}/mcp/"
         self._proc: subprocess.Popen[bytes] | None = None
         self._log: IO[bytes] | None = None
@@ -287,8 +312,15 @@ class SpawnedBackend:
         # as long as it runs, so the file's owner is this object, which closes it
         # in kill(). A pipe would risk filling and blocking the child instead.
         self._log = tempfile.TemporaryFile()  # noqa: SIM115
+        legacy = ["--legacy"] if self.legacy else []
         self._proc = subprocess.Popen(
-            [sys.executable, str(PROBE_BACKEND_SERVER), "--port", str(self.port)],
+            [
+                sys.executable,
+                str(PROBE_BACKEND_SERVER),
+                "--port",
+                str(self.port),
+                *legacy,
+            ],
             stdout=self._log,
             stderr=subprocess.STDOUT,
         )
@@ -347,16 +379,17 @@ def _free_loopback_port() -> int:
 
 
 @pytest.fixture
-def spawn_backend() -> Iterator[Callable[[], SpawnedBackend]]:
+def spawn_backend() -> Iterator[Callable[..., SpawnedBackend]]:
     """Return a factory that starts a real MCP server in a child process.
 
-    Every server it starts is killed at the end of the test, including one a
-    test has already killed and restarted itself.
+    ``legacy=True`` starts it serving only the protocol versions before
+    2026-07-28. Every server it starts is killed at the end of the test,
+    including one a test has already killed and restarted itself.
     """
     started: list[SpawnedBackend] = []
 
-    def _spawn() -> SpawnedBackend:
-        backend = SpawnedBackend(_free_loopback_port())
+    def _spawn(*, legacy: bool = False) -> SpawnedBackend:
+        backend = SpawnedBackend(_free_loopback_port(), legacy=legacy)
         backend.start()
         started.append(backend)
         return backend

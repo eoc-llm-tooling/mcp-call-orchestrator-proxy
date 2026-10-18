@@ -18,10 +18,12 @@ Design notes:
   connection-type error (the authoritative signal) and, when available, the
   underlying client's ``is_connected()``. Reconnection-after-reappear needs no
   polling either - the backoff retry loop *is* the "wait for it to come back".
-- ``initialize()`` never raises just because the backend is down: FastMCP's
-  proxy forwards ``initialize`` to us on every client-connect, so raising would
-  stop agents from connecting to the proxy at all while the backend is down. We
-  return the last-good (or a synthetic) result instead - "stay connectable,
+- What the backend negotiated (``metadata``: protocol version, server info,
+  capabilities, instructions) is recorded on every connect and kept after the
+  connection drops, read from whichever result the protocol version produced:
+  the ``initialize`` handshake or ``server/discover``. The proxy answers its own
+  clients' ``initialize`` and ``server/discover`` from it, never from the
+  backend, so a client can always complete its handshake - "stay connectable,
   degrade".
 - Shutdown is **prompt**: the backoff sleep is interruptible by the shutdown
   event, so SIGTERM during a long backoff tears down immediately rather than
@@ -36,14 +38,18 @@ import datetime
 import logging
 import random
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 import anyio
-import httpx
+import httpx2
+from mcp import MCPError
 from mcp import types as mcp_types
-from mcp.shared.exceptions import McpError
 
-from mcp_call_orchestrator_proxy.interfaces import MCPBackendClient
+from mcp_call_orchestrator_proxy.interfaces import (
+    MCPBackendClient,
+    NegotiatedBackendClient,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,58 +62,67 @@ _T = TypeVar("_T")
 _CONNECTION_ERRORS: tuple[type[BaseException], ...] = (
     RuntimeError,
     TimeoutError,
-    httpx.HTTPError,
+    httpx2.HTTPError,
     anyio.ClosedResourceError,
     anyio.EndOfStream,
     anyio.BrokenResourceError,
 )
 
 # A backend that restarts while keeping its HTTP listener up answers any request
-# still carrying the now-unknown streamable-HTTP session id with HTTP 404, which
-# the MCP SDK surfaces as this JSON-RPC error. That means the session is gone - a
-# broken connection to recover from, not a failed call - but it is not one of the
-# transport-level exceptions in _CONNECTION_ERRORS, so it is matched on its signal.
-_SESSION_TERMINATED_CODE = 32600
-_SESSION_TERMINATED_MESSAGE = "Session terminated"
+# still carrying the now-unknown streamable-HTTP session id with HTTP 404. The MCP
+# SDK surfaces the JSON-RPC error in that response's body when there is one, and
+# otherwise a stand-in of its own. Either means the session is gone - a broken
+# connection to recover from, not a failed call - but neither is one of the
+# transport-level exceptions in _CONNECTION_ERRORS, so they are matched exactly.
+# Only a session-holding (pre-2026-07-28) HTTP connection can produce them.
+_SESSION_GONE_SIGNALS: frozenset[tuple[int, str]] = frozenset(
+    {
+        (mcp_types.INVALID_REQUEST, "Session terminated"),  # the SDK's stand-in
+        (mcp_types.INVALID_REQUEST, "Session not found"),  # Python MCP SDK server
+        (-32001, "Session not found"),  # TypeScript MCP SDK server
+    }
+)
 
-# The SDK's own generic "the session is gone" signal (`mcp.types.CONNECTION_CLOSED`,
-# not imported directly to avoid depending on a low-level constant's import path):
-# `BaseSession`'s receive loop synthesizes this for every pending request once its
-# read stream ends, whatever the transport. That is exactly what a stdio backend's
-# dead subprocess produces - the pipe closing is swallowed *inside* the SDK's own
-# receive loop and turned into this per-request error, so it never reaches us as one
-# of the raw anyio stream errors in _CONNECTION_ERRORS.
-_CONNECTION_CLOSED_CODE = -32000
+# The SDK's own generic "the session is gone" signal: its JSON-RPC dispatcher
+# synthesizes this for every pending request once its read stream ends, whatever
+# the transport. That is exactly what a stdio backend's dead subprocess produces -
+# the pipe closing is swallowed *inside* the SDK's receive loop and turned into this
+# per-request error, so it never reaches us as one of the raw anyio stream errors
+# in _CONNECTION_ERRORS.
+_CONNECTION_CLOSED_CODE = mcp_types.CONNECTION_CLOSED
 
 
 def _is_connection_broken_signal(exc: BaseException) -> bool:
-    """True for either of the SDK's two "the session is gone, not just this call
-    failed" signals - the generic one and the streamable-HTTP-specific clean-404.
+    """True for a "the session is gone, not just this call failed" signal - the
+    SDK's generic one or a streamable-HTTP backend's clean 404.
 
     Deliberately narrow beyond that: an ordinary failed or unknown tool call also
-    raises ``McpError``, so matching the whole class would turn a per-call error
+    raises ``MCPError``, so matching the whole class would turn a per-call error
     into a full connection teardown.
     """
-    if not isinstance(exc, McpError):
+    if not isinstance(exc, MCPError):
         return False
     if exc.error.code == _CONNECTION_CLOSED_CODE:
         return True
-    return (
-        exc.error.code == _SESSION_TERMINATED_CODE
-        and exc.error.message == _SESSION_TERMINATED_MESSAGE
-    )
+    return (exc.error.code, exc.error.message) in _SESSION_GONE_SIGNALS
 
 
-_SYNTHETIC_INIT = mcp_types.InitializeResult(
-    protocolVersion=mcp_types.LATEST_PROTOCOL_VERSION,
-    capabilities=mcp_types.ServerCapabilities(),
-    serverInfo=mcp_types.Implementation(
-        name="mcp-call-orchestrator-proxy (backend unavailable)", version="0"
-    ),
-)
+@dataclass(frozen=True)
+class BackendMetadata:
+    """What the backend negotiated on its last successful connect.
+
+    Read from the ``initialize`` handshake's result (protocol versions up to
+    2025-11-25) or from ``server/discover`` (2026-07-28 and later); the fields
+    are the ones both carry.
+    """
+
+    protocol_version: str | None
+    server_info: mcp_types.Implementation | None
+    capabilities: mcp_types.ServerCapabilities | None
+    instructions: str | None
 
 
-class MethodNotSupportedError(McpError):
+class MethodNotSupportedError(MCPError):
     """The backend answered that it does not implement the requested method.
 
     JSON-RPC "Method not found", e.g. ``prompts/list`` on a backend that serves
@@ -140,7 +155,7 @@ class ResilientBackend:
 
     def __init__(
         self,
-        factory: Callable[[], MCPBackendClient],
+        factory: Callable[[], NegotiatedBackendClient],
         *,
         backend_url: str = "",
         connect_timeout: float = 30.0,
@@ -157,8 +172,8 @@ class ResilientBackend:
         self._multiplier = backoff_multiplier
         self._health_poll = health_poll
 
-        self._live: MCPBackendClient | None = None
-        self._last_initialize_result: mcp_types.InitializeResult | None = None
+        self._live: NegotiatedBackendClient | None = None
+        self._metadata: BackendMetadata | None = None
 
         self._shutdown = asyncio.Event()
         self._broken = asyncio.Event()
@@ -221,8 +236,16 @@ class ResilientBackend:
         while not self._shutdown.is_set():
             try:
                 client = self._factory()
+                # Entering the client negotiates the protocol version with the
+                # backend, by the SDK's default: server/discover first, falling
+                # back to the initialize handshake.
                 async with client:
-                    self._last_initialize_result = await client.initialize()
+                    self._metadata = BackendMetadata(
+                        protocol_version=client.protocol_version,
+                        server_info=client.server_info,
+                        capabilities=client.server_capabilities,
+                        instructions=client.instructions,
+                    )
                     self._live = client
                     self._connected_since = _utcnow()
                     failures = self._consecutive_failures
@@ -243,7 +266,9 @@ class ResilientBackend:
                         )
                     else:
                         logger.info(
-                            "resilient: backend connected (%s)", self._backend_url
+                            "resilient: backend connected (%s, protocol %s)",
+                            self._backend_url,
+                            client.protocol_version,
                         )
                     self._first_attempt_done.set()
                     await self._hold(client)
@@ -334,7 +359,7 @@ class ResilientBackend:
         base = "Backend is not available"
         return f"{base} at {self._backend_url}" if self._backend_url else base
 
-    def _require_live(self) -> MCPBackendClient:
+    def _require_live(self) -> NegotiatedBackendClient:
         client = self._live
         if client is None:
             raise BackendUnavailableError(self._unavailable_message())
@@ -345,23 +370,27 @@ class ResilientBackend:
         self._last_error = f"{type(exc).__name__}: {exc}"
         return BackendUnavailableError(f"{self._unavailable_message()}: {exc}")
 
+    @property
+    def metadata(self) -> BackendMetadata | None:
+        """What the backend negotiated on its last successful connect.
+
+        Kept after the connection drops; ``None`` until the first connect. Local
+        state only: reading it never touches the backend.
+        """
+        return self._metadata
+
     # -- delegated MCPBackendClient surface ----------------------------------
 
-    async def initialize(self) -> mcp_types.InitializeResult:
-        """Return the last-good (or synthetic) init result; never raise when down.
-
-        Populated by the supervisor on connect. Never touches the network here,
-        so a client can always complete its initialize handshake with the proxy.
-        """
-        if self._last_initialize_result is not None:
-            return self._last_initialize_result
-        return _SYNTHETIC_INIT
+    @property
+    def protocol_version(self) -> str | None:
+        """``None``: see ``MCPBackendClient.protocol_version``."""
+        return None
 
     async def _guarded(self, op: Awaitable[_T]) -> _T:
         """Run a delegated backend call, turning a broken connection into a reconnect.
 
         A transport-level error (``_CONNECTION_ERRORS``) or a connection-broken
-        ``McpError`` signal (``_is_connection_broken_signal``) marks the connection
+        ``MCPError`` signal (``_is_connection_broken_signal``) marks the connection
         broken - which wakes the supervisor to tear down and rebuild the client -
         and is re-raised as ``BackendUnavailableError``. A "Method not found"
         answer is re-raised as ``MethodNotSupportedError``. Any other error is an
@@ -371,26 +400,11 @@ class ResilientBackend:
             return await op
         except _CONNECTION_ERRORS as exc:
             raise self._connection_failed(exc) from exc
-        except McpError as exc:
+        except MCPError as exc:
             if _is_connection_broken_signal(exc):
                 raise self._connection_failed(exc) from exc
             if exc.error.code == mcp_types.METHOD_NOT_FOUND:
-                raise MethodNotSupportedError(exc.error) from exc
-            raise
-
-    async def ping(self) -> bool:
-        client = self._live
-        if client is None:
-            return False
-        try:
-            return await client.ping()
-        except _CONNECTION_ERRORS as exc:
-            self._connection_failed(exc)
-            return False
-        except McpError as exc:
-            if _is_connection_broken_signal(exc):
-                self._connection_failed(exc)
-                return False
+                raise MethodNotSupportedError.from_error_data(exc.error) from exc
             raise
 
     async def list_tools(self) -> list[mcp_types.Tool]:
@@ -415,18 +429,22 @@ class ResilientBackend:
         client = self._require_live()
         return await self._guarded(client.list_resource_templates())
 
-    async def read_resource(
-        self, uri: str
-    ) -> list[mcp_types.TextResourceContents | mcp_types.BlobResourceContents]:
+    async def read_resource_mcp(
+        self, uri: str, meta: dict[str, Any] | None = None
+    ) -> mcp_types.ReadResourceResult:
         client = self._require_live()
-        return await self._guarded(client.read_resource(uri))
+        return await self._guarded(client.read_resource_mcp(uri, meta=meta))
 
     async def list_prompts(self) -> list[mcp_types.Prompt]:
         client = self._require_live()
         return await self._guarded(client.list_prompts())
 
     async def get_prompt(
-        self, name: str, arguments: dict[str, Any] | None = None
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> mcp_types.GetPromptResult:
         client = self._require_live()
-        return await self._guarded(client.get_prompt(name, arguments))
+        return await self._guarded(client.get_prompt(name, arguments, meta=meta))

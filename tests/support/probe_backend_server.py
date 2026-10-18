@@ -22,11 +22,20 @@ pid, so a test can tell whether a reconnect actually replaced the process),
 ``env_var`` (echoes back one entry from this process's own environment, so a
 test can see exactly what reached the child).
 
+It declares server instructions (``INSTRUCTIONS``), so a test can see whether
+they reach the proxy's clients.
+
 Run as a script; it either binds the loopback port it is given and serves
 Streamable HTTP on it, or serves over stdio::
 
     python tests/support/probe_backend_server.py --port 12345
     python tests/support/probe_backend_server.py --stdio
+
+With ``--legacy`` (HTTP only) it serves only the protocol versions before
+2026-07-28: it answers ``server/discover`` with "Method not found", as a server
+built before that version does, so a client that negotiates automatically falls
+back to the ``initialize`` handshake. Over stdio the first request fixes a
+connection's protocol version, so this mode has no stdio form.
 """
 
 from __future__ import annotations
@@ -37,8 +46,14 @@ import contextlib
 import os
 import socket
 from collections.abc import AsyncIterator
+from typing import Any
 
 from fastmcp import FastMCP
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from mcp import MCPError
+from mcp import types as mcp_types
+
+INSTRUCTIONS = "PROBE BACKEND INSTRUCTIONS"
 
 # A hang must outlive any timeout under test without pinning the process open
 # forever if a teardown is ever missed.
@@ -70,10 +85,27 @@ class _CallStats:
             self.active -= 1
 
 
-def build_server() -> FastMCP:
+class _HandshakeOnly(Middleware):
+    """Answers ``server/discover`` as a server that predates it does."""
+
+    async def on_discover(
+        self,
+        context: MiddlewareContext[mcp_types.DiscoverRequest],
+        call_next: CallNext[
+            mcp_types.DiscoverRequest, mcp_types.DiscoverResult | dict[str, Any]
+        ],
+    ) -> mcp_types.DiscoverResult | dict[str, Any]:
+        raise MCPError(code=mcp_types.METHOD_NOT_FOUND, message="Method not found")
+
+
+def build_server(*, legacy: bool = False) -> FastMCP:
     """Build the probe backend. Performs no I/O."""
     stats = _CallStats()
-    mcp: FastMCP = FastMCP(name="probe-backend")
+    mcp: FastMCP = FastMCP(
+        name="probe-backend",
+        instructions=INSTRUCTIONS,
+        middleware=[_HandshakeOnly()] if legacy else None,
+    )
 
     @mcp.tool
     async def echo(value: str) -> str:
@@ -123,7 +155,7 @@ def build_server() -> FastMCP:
     return mcp
 
 
-def _serve_http(port: int) -> None:
+def _serve_http(port: int, *, legacy: bool) -> None:
     """Bind the given loopback port and serve Streamable HTTP on it until killed."""
     # Bind here rather than letting uvicorn do it, so that a port already taken
     # fails loudly and immediately instead of racing the parent's readiness poll.
@@ -132,7 +164,7 @@ def _serve_http(port: int) -> None:
     sock.bind(("127.0.0.1", port))
 
     asyncio.run(
-        build_server().run_http_async(
+        build_server(legacy=legacy).run_http_async(
             host="127.0.0.1",
             port=port,
             sockets=[sock],
@@ -152,16 +184,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--stdio", action="store_true")
+    parser.add_argument("--legacy", action="store_true")
     args = parser.parse_args()
 
     if args.stdio == (args.port is not None):
         parser.error("specify exactly one of --port or --stdio")
+    if args.stdio and args.legacy:
+        parser.error("--legacy applies to --port only")
 
     if args.stdio:
         _serve_stdio()
     else:
         assert args.port is not None
-        _serve_http(args.port)
+        _serve_http(args.port, legacy=args.legacy)
 
 
 if __name__ == "__main__":

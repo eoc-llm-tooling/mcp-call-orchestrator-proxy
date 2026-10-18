@@ -131,19 +131,25 @@ class _ListingBackend:
     async def __aexit__(self, *exc: object) -> None:
         return None
 
-    async def initialize(self) -> mcp_types.InitializeResult:
-        return mcp_types.InitializeResult(
-            protocolVersion="2025-06-18",
-            capabilities=mcp_types.ServerCapabilities(),
-            serverInfo=mcp_types.Implementation(name="fake", version="0"),
-        )
+    @property
+    def protocol_version(self) -> str | None:
+        return "2025-11-25"
 
-    async def ping(self) -> bool:
-        return True
+    @property
+    def server_info(self) -> mcp_types.Implementation | None:
+        return mcp_types.Implementation(name="fake", version="0")
+
+    @property
+    def server_capabilities(self) -> mcp_types.ServerCapabilities | None:
+        return mcp_types.ServerCapabilities(tools=mcp_types.ToolsCapability())
+
+    @property
+    def instructions(self) -> str | None:
+        return None
 
     async def list_tools(self) -> list[mcp_types.Tool]:
         return [
-            mcp_types.Tool(name=n, description="", inputSchema={"type": "object"})
+            mcp_types.Tool(name=n, description="", input_schema={"type": "object"})
             for n in self._tools
         ]
 
@@ -164,17 +170,23 @@ class _ListingBackend:
 
     async def list_resource_templates(self) -> list[mcp_types.ResourceTemplate]:
         return [
-            mcp_types.ResourceTemplate(uriTemplate=t, name=t) for t in self._templates
+            mcp_types.ResourceTemplate(uri_template=t, name=t) for t in self._templates
         ]
 
-    async def read_resource(self, uri: str) -> list[Any]:
-        return []
+    async def read_resource_mcp(
+        self, uri: str, meta: dict[str, Any] | None = None
+    ) -> mcp_types.ReadResourceResult:
+        return mcp_types.ReadResourceResult(contents=[])
 
     async def list_prompts(self) -> list[mcp_types.Prompt]:
         return [mcp_types.Prompt(name=n) for n in self._prompts]
 
     async def get_prompt(
-        self, name: str, arguments: dict[str, Any] | None = None
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> mcp_types.GetPromptResult:
         return mcp_types.GetPromptResult(messages=[])
 
@@ -269,22 +281,28 @@ class MultiToolBackend:
     async def __aexit__(self, *exc: object) -> None:
         return None
 
-    async def initialize(self) -> mcp_types.InitializeResult:
-        return mcp_types.InitializeResult(
-            protocolVersion="2025-06-18",
-            capabilities=mcp_types.ServerCapabilities(),
-            serverInfo=mcp_types.Implementation(name="fake", version="0"),
-        )
+    @property
+    def protocol_version(self) -> str | None:
+        return "2025-11-25"
 
-    async def ping(self) -> bool:
-        return True
+    @property
+    def server_info(self) -> mcp_types.Implementation | None:
+        return mcp_types.Implementation(name="fake", version="0")
+
+    @property
+    def server_capabilities(self) -> mcp_types.ServerCapabilities | None:
+        return mcp_types.ServerCapabilities(tools=mcp_types.ToolsCapability())
+
+    @property
+    def instructions(self) -> str | None:
+        return None
 
     async def list_tools(self) -> list[mcp_types.Tool]:
         return [
             mcp_types.Tool(
                 name="echo",
                 description="echo",
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {"value": {"type": "string"}},
                     "required": ["value"],
@@ -293,7 +311,7 @@ class MultiToolBackend:
             mcp_types.Tool(
                 name="hang",
                 description="hang",
-                inputSchema={"type": "object", "properties": {}},
+                input_schema={"type": "object", "properties": {}},
             ),
         ]
 
@@ -315,14 +333,20 @@ class MultiToolBackend:
     async def list_resource_templates(self) -> list[mcp_types.ResourceTemplate]:
         return []
 
-    async def read_resource(self, uri: str) -> list[Any]:
-        return []
+    async def read_resource_mcp(
+        self, uri: str, meta: dict[str, Any] | None = None
+    ) -> mcp_types.ReadResourceResult:
+        return mcp_types.ReadResourceResult(contents=[])
 
     async def list_prompts(self) -> list[mcp_types.Prompt]:
         return []
 
     async def get_prompt(
-        self, name: str, arguments: dict[str, Any] | None = None
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> mcp_types.GetPromptResult:
         return mcp_types.GetPromptResult(messages=[])
 
@@ -394,6 +418,6 @@ async def test_misconfig_does_not_block_startup(
 
     async with Client(app.mcp) as client:
         # handshake works
-        assert client.initialize_result is not None
+        assert client.protocol_version is not None
         names = {t.name for t in await client.list_tools()}
     assert names == {"echo"}

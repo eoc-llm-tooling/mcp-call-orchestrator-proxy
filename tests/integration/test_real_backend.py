@@ -74,7 +74,7 @@ async def test_proxy_exposes_exact_schema_parity(real_client, real_settings):
         pt = next((t for t in proxy_tools if t.name == bt.name), None)
         assert pt is not None, f"backend tool {bt.name} missing from proxy"
         assert pt.description == bt.description
-        assert pt.inputSchema == bt.inputSchema, f"schema mismatch for {bt.name}"
+        assert pt.input_schema == bt.input_schema, f"schema mismatch for {bt.name}"
 
     # Best-effort parity for resources/prompts (only if both sides returned values)
     if backend_resources is not None and proxy_resources is not None:
@@ -94,7 +94,7 @@ async def test_real_client_can_call_a_backend_tool(real_client, probe_tool):
     result = await real_client.call_tool_mcp(name, args)
 
     assert result is not None
-    assert not result.isError, f"Tool call to {name} failed: {result}"
+    assert not result.is_error, f"Tool call to {name} failed: {result}"
     # Some backends may return empty content for certain tools; presence of result is enough
 
 
@@ -121,6 +121,26 @@ async def test_full_app_with_real_client(real_settings, probe_tool):
         result = await client.call_tool(name, args)
         assert result is not None
         # result.content may be present or is_error False depending on backend tool
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("client_mode", ["legacy", "auto"])
+async def test_each_client_protocol_reaches_the_backend(
+    real_client, real_settings, probe_tool, client_mode
+):
+    """A client opening with the ``initialize`` handshake ("legacy") and one
+    negotiating automatically (``server/discover`` first) both complete discovery
+    and a tool call, and receive the backend's own instructions (or none, when it
+    declares none), whichever protocol version the backend speaks."""
+    name, args = probe_tool
+    proxy_app = create_proxy_app(settings=real_settings)
+
+    async with Client(proxy_app.mcp, mode=client_mode) as client:
+        assert client.instructions == real_client.instructions
+        assert name in {tool.name for tool in await client.list_tools()}
+        result = await client.call_tool_mcp(name, args)
+
+    assert not result.is_error, f"Tool call to {name} failed: {result}"
 
 
 @pytest.mark.integration

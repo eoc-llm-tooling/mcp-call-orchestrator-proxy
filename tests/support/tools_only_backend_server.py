@@ -4,7 +4,8 @@ Built on the MCP SDK's low-level ``Server`` rather than FastMCP: a FastMCP serve
 always answers prompt and resource listings (with empty lists), while a server
 that registers only ``tools/list`` and ``tools/call`` answers ``prompts/list``,
 ``resources/list`` and ``resources/templates/list`` with JSON-RPC -32601
-"Method not found", as many real tools-only backends do.
+"Method not found", as many real tools-only backends do. It advertises neither
+capability, either.
 
 Run as a script; it serves over stdio until the parent closes the pipes::
 
@@ -17,33 +18,39 @@ from typing import Any
 
 import anyio
 from mcp import types
+from mcp.server.context import ServerRequestContext
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
+
+ECHO = types.Tool(
+    name="echo",
+    description="Echo the given value back verbatim.",
+    input_schema={
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+    },
+)
+
+
+async def _list_tools(
+    _ctx: ServerRequestContext[Any], _params: types.PaginatedRequestParams | None
+) -> types.ListToolsResult:
+    return types.ListToolsResult(tools=[ECHO])
+
+
+async def _call_tool(
+    _ctx: ServerRequestContext[Any], params: types.CallToolRequestParams
+) -> types.CallToolResult:
+    value = (params.arguments or {})["value"]
+    return types.CallToolResult(content=[types.TextContent(type="text", text=value)])
 
 
 def build_server() -> Server[Any]:
     """Build the tools-only backend. Performs no I/O."""
-    server: Server[Any] = Server("tools-only-backend")
-
-    @server.list_tools()  # type: ignore[no-untyped-call, untyped-decorator]
-    async def list_tools() -> list[types.Tool]:
-        return [
-            types.Tool(
-                name="echo",
-                description="Echo the given value back verbatim.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {"value": {"type": "string"}},
-                    "required": ["value"],
-                },
-            )
-        ]
-
-    @server.call_tool()  # type: ignore[untyped-decorator]
-    async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.Content]:
-        return [types.TextContent(type="text", text=str(arguments["value"]))]
-
-    return server
+    return Server(
+        "tools-only-backend", on_list_tools=_list_tools, on_call_tool=_call_tool
+    )
 
 
 async def _serve_stdio() -> None:

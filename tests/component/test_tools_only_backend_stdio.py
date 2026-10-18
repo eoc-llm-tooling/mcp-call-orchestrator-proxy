@@ -1,9 +1,10 @@
 """A backend that implements tools only, reached over stdio through the proxy.
 
-Such a backend answers prompt and resource discovery with JSON-RPC -32601
-"Method not found". That is a normal answer, so it must stay below WARNING and
-carry no traceback (ARCHITECTURE.md, "Severity carries meaning"), while clients
-still get empty listings. The backend is a real MCP server
+Such a backend advertises neither the prompts nor the resources capability, so
+the proxy advertises neither to its clients. A client that lists them anyway is
+answered by the backend with JSON-RPC -32601 "Method not found". That is a normal
+answer, so it must stay below WARNING and carry no traceback (ARCHITECTURE.md,
+"Severity carries meaning"), while clients still get empty listings. The backend is a real MCP server
 (``tests/support/tools_only_backend_server.py``), so the error reaches the proxy
 in the shape the SDK actually produces.
 """
@@ -78,3 +79,24 @@ async def test_unsupported_discovery_is_logged_below_warning_without_traceback(
         assert len(for_op) == 2, f"expected one record per client for {op}"
         assert all(r.levelno == logging.INFO for r in for_op)
         assert all(r.exc_info is None for r in for_op), f"{op} logged a traceback"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_mode", ["legacy", "auto"])
+async def test_prompts_and_resources_are_not_advertised_when_the_backend_lacks_them(
+    tmp_path: Path, serve_over_http, client_mode: str
+) -> None:
+    """The counterpart, a backend that has them, is in test_protocol_matrix_http."""
+    proxy_app = create_proxy_app(
+        settings=ProxySettings(backend_config=_write_config(tmp_path))
+    )
+
+    async with (
+        serve_over_http(proxy_app.mcp) as url,
+        Client(url, mode=client_mode) as client,
+    ):
+        capabilities = client.server_capabilities
+        assert capabilities is not None
+        assert capabilities.tools is not None
+        assert capabilities.prompts is None
+        assert capabilities.resources is None

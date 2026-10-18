@@ -77,6 +77,25 @@ async def wait_for_connected(client: Client, expected: bool) -> None:
     pytest.fail(f"proxy never reported connected={expected}; last: {snapshot}")
 
 
+async def echo_once_served(client: Client, value: str) -> Any:
+    """Call ``echo`` until the proxy serves it, or give up after a while.
+
+    For a test whose backend connection may still be breaking or rebuilding
+    when the call is made.
+    """
+    deadline = time.monotonic() + 15.0
+    while True:
+        echoed = await client.call_tool("echo", {"value": value}, raise_on_error=False)
+        if not echoed.is_error or time.monotonic() >= deadline:
+            return echoed
+        await asyncio.sleep(0.1)
+
+
+BACKEND_KINDS = pytest.mark.parametrize(
+    "backend_legacy", [True, False], ids=["backend-2025", "backend-2026"]
+)
+
+
 @pytest.mark.asyncio
 async def test_concurrent_sessions_are_serialized_at_a_real_backend(
     spawn_backend, backend_config_file, serve_over_http
@@ -178,11 +197,11 @@ async def test_proxy_mirrors_a_real_backend_tool_schemas_exactly(
     proxy_app = create_proxy_app(settings=settings)
 
     async with Client(backend.url) as direct:
-        backend_tools = {t.name: t.inputSchema for t in await direct.list_tools()}
+        backend_tools = {t.name: t.input_schema for t in await direct.list_tools()}
     assert backend_tools, "probe backend exposed no tools"
 
     async with serve_over_http(proxy_app.mcp) as url, Client(url) as client:
-        proxied_tools = {t.name: t.inputSchema for t in await client.list_tools()}
+        proxied_tools = {t.name: t.input_schema for t in await client.list_tools()}
 
     assert set(proxied_tools) == set(backend_tools) | {"backend_status"}, (
         "the proxied tool surface must be the backend's, plus backend_status"
@@ -192,13 +211,14 @@ async def test_proxy_mirrors_a_real_backend_tool_schemas_exactly(
 
 
 @pytest.mark.asyncio
+@BACKEND_KINDS
 async def test_proxy_survives_a_real_backend_dying_and_coming_back(
-    spawn_backend, backend_config_file, serve_over_http
+    spawn_backend, backend_config_file, serve_over_http, backend_legacy: bool
 ) -> None:
     """A real backend process is killed outright and later restarted at the same
     address. The proxy stays connectable throughout, reports the outage, and
     reconnects on its own - no restart of the proxy, no client intervention."""
-    backend = spawn_backend()
+    backend = spawn_backend(legacy=backend_legacy)
     settings = ProxySettings(
         backend_config=backend_config_file(backend.url), **_RESILIENCE_TUNING
     )
@@ -226,6 +246,32 @@ async def test_proxy_survives_a_real_backend_dying_and_coming_back(
 
 
 @pytest.mark.asyncio
+@BACKEND_KINDS
+async def test_proxy_serves_again_after_a_backend_restart_it_did_not_see(
+    spawn_backend, backend_config_file, serve_over_http, backend_legacy: bool
+) -> None:
+    """The backend restarts between two calls, so the first the proxy hears of it
+    is the next call. A pre-2026 backend no longer knows the proxy's session and
+    rejects it (HTTP 404, "Session terminated"), which must rebuild the
+    connection; a 2026-07-28 backend holds no session to lose."""
+    backend = spawn_backend(legacy=backend_legacy)
+    settings = ProxySettings(
+        backend_config=backend_config_file(backend.url), **_RESILIENCE_TUNING
+    )
+    proxy_app = create_proxy_app(settings=settings)
+
+    async with serve_over_http(proxy_app.mcp) as url, Client(url) as client:
+        echoed = await client.call_tool("echo", {"value": "before"})
+        assert echoed.content[0].text == "before"
+
+        backend.kill()
+        backend.start()
+
+        echoed = await echo_once_served(client, "after")
+        assert echoed.content[0].text == "after"
+
+
+@pytest.mark.asyncio
 async def test_a_hung_backend_call_does_not_wedge_the_queue(
     spawn_backend, backend_config_file, serve_over_http
 ) -> None:
@@ -245,19 +291,22 @@ async def test_a_hung_backend_call_does_not_wedge_the_queue(
             await asyncio.wait_for(client.call_tool("hang", {}), timeout=20.0)
 
         # The queue is still usable. A hang can break the backend connection (a
-        # call that never answered is indistinguishable from a dead one), so give
-        # the supervisor its moment before insisting the queue works.
-        await wait_for_connected(client, expected=True)
-        echoed = await client.call_tool("echo", {"value": "after the hang"})
+        # call that never answered is indistinguishable from a dead one; over
+        # HTTP the transport's read timeout ends the connection just after the
+        # call's own timeout), so give the supervisor its moment to rebuild it
+        # before insisting the queue works.
+        echoed = await echo_once_served(client, "after the hang")
         assert echoed.content[0].text == "after the hang"
 
 
 @pytest.mark.asyncio
+@BACKEND_KINDS
 async def test_a_warnings_only_filter_shows_the_outage_and_the_recovery(
     spawn_backend,
     backend_config_file,
     serve_over_http,
     caplog: pytest.LogCaptureFixture,
+    backend_legacy: bool,
 ) -> None:
     """Severity alone must tell the operator whether something needs them.
 
@@ -272,7 +321,7 @@ async def test_a_warnings_only_filter_shows_the_outage_and_the_recovery(
     """
     caplog.set_level(logging.DEBUG, logger="mcp_call_orchestrator_proxy")
 
-    backend = spawn_backend()
+    backend = spawn_backend(legacy=backend_legacy)
     settings = ProxySettings(
         backend_config=backend_config_file(backend.url), **_RESILIENCE_TUNING
     )

@@ -21,8 +21,8 @@ from typing import Any
 
 import pytest
 from fastmcp import Client
+from mcp import MCPError
 from mcp import types as mcp_types
-from mcp.shared.exceptions import McpError
 
 from mcp_call_orchestrator_proxy.app import create_proxy_app
 from mcp_call_orchestrator_proxy.config import ProxySettings
@@ -49,22 +49,28 @@ class GatedEchoBackend:
     def is_connected(self) -> bool:
         return self._entered
 
-    async def initialize(self) -> mcp_types.InitializeResult:
-        return mcp_types.InitializeResult(
-            protocolVersion=mcp_types.LATEST_PROTOCOL_VERSION,
-            capabilities=mcp_types.ServerCapabilities(),
-            serverInfo=mcp_types.Implementation(name="gated-echo", version="0"),
-        )
+    @property
+    def protocol_version(self) -> str | None:
+        return "2025-11-25"
 
-    async def ping(self) -> bool:
-        return True
+    @property
+    def server_info(self) -> mcp_types.Implementation | None:
+        return mcp_types.Implementation(name="gated-echo", version="0")
+
+    @property
+    def server_capabilities(self) -> mcp_types.ServerCapabilities | None:
+        return mcp_types.ServerCapabilities(tools=mcp_types.ToolsCapability())
+
+    @property
+    def instructions(self) -> str | None:
+        return None
 
     async def list_tools(self) -> list[mcp_types.Tool]:
         return [
             mcp_types.Tool(
                 name="echo",
                 description="Echo the given value back verbatim.",
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {"value": {"type": "string"}},
                     "required": ["value"],
@@ -89,16 +95,20 @@ class GatedEchoBackend:
     async def list_resource_templates(self) -> list[mcp_types.ResourceTemplate]:
         return []
 
-    async def read_resource(
-        self, uri: str
-    ) -> list[mcp_types.TextResourceContents | mcp_types.BlobResourceContents]:
-        return []
+    async def read_resource_mcp(
+        self, uri: str, meta: dict[str, Any] | None = None
+    ) -> mcp_types.ReadResourceResult:
+        return mcp_types.ReadResourceResult(contents=[])
 
     async def list_prompts(self) -> list[mcp_types.Prompt]:
         return []
 
     async def get_prompt(
-        self, name: str, arguments: dict[str, Any] | None = None
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> mcp_types.GetPromptResult:
         return mcp_types.GetPromptResult(messages=[])
 
@@ -109,7 +119,7 @@ class SessionTerminatingBackend(GatedEchoBackend):
     Connects and serves ``echo`` normally (an always-up ``GatedEchoBackend``). Once
     ``terminate()`` is called, every delegated call raises the exact error the MCP
     streamable-HTTP client raises when a backend answers a request on a now-unknown
-    session id - ``McpError(code=32600, "Session terminated")`` - the clean-404 path
+    session id - ``MCPError(code=-32600, "Session terminated")`` - the clean-404 path
     a backend restart takes when its HTTP listener never drops. ``is_connected()``
     keeps returning True while terminated: the listener is up, only the session is
     gone, so the break can be learned only from a failing call, not the transport. A
@@ -126,13 +136,7 @@ class SessionTerminatingBackend(GatedEchoBackend):
 
     def _guard(self) -> None:
         if self._terminated:
-            raise McpError(
-                mcp_types.ErrorData(code=32600, message="Session terminated")
-            )
-
-    async def ping(self) -> bool:
-        self._guard()
-        return await super().ping()
+            raise MCPError(code=mcp_types.INVALID_REQUEST, message="Session terminated")
 
     async def list_tools(self) -> list[mcp_types.Tool]:
         self._guard()
@@ -215,7 +219,7 @@ async def test_proxy_self_heals_after_a_terminated_backend_session(
     serve_over_http,
 ) -> None:
     """A backend that restarts with its HTTP listener still up rejects the proxy's
-    stale session with a clean 404 - surfaced as ``McpError`` "Session terminated",
+    stale session with a clean 404 - surfaced as ``MCPError`` "Session terminated",
     not a dropped connection. The proxy must recognise that as a break and reconnect
     on its own, with no restart. This is the exact failure that once left the proxy
     serving zero tools until its service was restarted by hand."""

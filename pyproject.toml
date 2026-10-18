@@ -10,8 +10,8 @@ authors = [
     {name = "Vladimir Nazarenko"},
 ]
 dependencies = [
-    "fastmcp>=3.4.4,<4",
-    "mcp>=1.28.1,<2",
+    "fastmcp>=4.1.1,<5",
+    "mcp>=2.3.0,<3",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
     "typer>=0.26.8",
