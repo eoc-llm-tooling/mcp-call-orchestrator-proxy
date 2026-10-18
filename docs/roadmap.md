@@ -29,10 +29,58 @@ nothing here is a scheduled commitment, and the order changes when a real need d
 
 ---
 
-## Next: run it where you run things
+## Next
+
+The next two releases, in order. Each issue is merged and verified on its own; the milestone
+holds the release's issues.
+
+### v0.4.3 Safety fixes
+
+Defects in released behaviour where a documented guarantee fails, a fresh install breaks, or the
+log is mis-leveled. No new behaviour.
+
+- [#1] — a backend config entry with FastMCP transform keys bypasses the stdio `keep_alive`
+  override and the TLS setting. The fix rejects those keys at startup until v0.6.0 honours the
+  safe subset.
+- [#2] — the `fastmcp`/`mcp` ranges have no upper bound, so a fresh resolution installs
+  versions the proxy cannot import. The fix caps them below the next major.
+- [#3] — a backend without prompts or resources logs an ERROR with a traceback on every
+  client's capability discovery.
+- [#4] — tool schemas reach clients with `$ref` inlined, so their structure differs from the
+  backend's.
+
+### v0.5.0 FastMCP 4
+
+FastMCP 4 brings MCP SDK 2 and the sessionless 2026-07-28 protocol version. On it the current
+proxy does not import, cannot connect to a healthy backend, and fails every client handshake.
+
+- [#5] — serve current MCP protocol versions on FastMCP 4: both protocol versions on the
+  client side and on the backend side, a server layer of the proxy's own in place of
+  `FastMCPProxy`, and the docs brought up to date. Depends on [#2].
+- [#6] — the backend's server `instructions` are not forwarded to clients. Closed by [#5].
+
+## Later
+
+### v0.6.0 Description overrides
+
+What agents are told about the backend becomes the operator's to tune; names and schema
+structure stay exact.
+
+- [#7] — override the descriptions of tools, arguments, prompts and resources, and the
+  server's `instructions`, from an operator file. Depends on [#5].
+- [#8] — honour the safe subset of FastMCP's `"tools"` key in the backend config, as text
+  overrides and exposure-control entries; reject the rest at startup. Depends on [#1] and
+  [#7].
+
+---
+
+## Deferred
+
+### Container image
 
 The `systemd --user` and `supervisord` recipes both assume a Python toolchain and a checkout on
-the host. That assumption doesn't hold everywhere the proxy is useful.
+the host. That assumption doesn't hold everywhere the proxy is useful. Not planned for any of
+the releases above.
 
 **Intent.** A container image. Configure and inject the backend secret the way a container
 operator normally would; no Python toolchain on the host; the secret never baked into an image
@@ -46,37 +94,30 @@ to live inside the container to be spawnable at all, so that case is served by a
 "derive your own image from this one" pattern — add your backend's runtime on top of the base —
 rather than by shipping an image that pretends to carry every runtime.
 
-## Later: let some tools skip the queue
-
-Blanket serialization is the right default and the reason this exists — but it's a tax. A cheap,
-read-only, concurrency-safe tool that gets called constantly ends up queued behind an expensive
-write. You know which of your backend's tools are safe; the proxy can't, and shouldn't guess.
-
-**Intent.** Mark specific tools, by name, as concurrency-safe. They run in a second lane with
-its own limit, alongside the serialized one — they do **not** bypass the queue entirely, so
-total load on the backend stays bounded (serialized limit + concurrent limit). Off by default,
-explicit, never a mode you can fall into.
-
-**Expected result.** Under load, the backend serves several exempt calls at once while every
-other tool still runs strictly one at a time. Exempt calls may overtake queued ones — that's the
-point, and there is deliberately no ordering guarantee between the two lanes. A hung exempt call
-still can't delay the serialized queue.
-
----
-
 ## Under consideration
 
+Ideas without an issue or a release.
+
+- **Agent guidance of the operator's own.** A skills directory and proxy-native prompts, served
+  beside the backend's items, for guidance about using a backend in a particular setting that
+  the backend's author could not write.
+- **Let some tools skip the queue.** Blanket serialization is the right default and the reason
+  this exists — but it's a tax. A cheap, read-only, concurrency-safe tool that gets called
+  constantly ends up queued behind an expensive write. You know which of your backend's tools
+  are safe; the proxy can't, and shouldn't guess. Tools marked concurrency-safe by name would
+  run in a second lane with its own limit, alongside the serialized one — not bypassing the
+  queue, so total load on the backend stays bounded (serialized limit + concurrent limit). Off
+  by default, explicit, never a mode you can fall into. Exempt calls may overtake queued ones,
+  with deliberately no ordering guarantee between the two lanes, and a hung exempt call still
+  can't delay the serialized queue.
 - **Metrics.** Queue depth, wait time and backend flaps are logged but nothing aggregates them.
   Worth doing if the logs stop being enough.
 - **Glob patterns in exposure rules.** Exact names first; patterns only if the lists get
   unwieldy in practice.
-- **Quiet down "unsupported method" noise from `list_prompts`/`list_resources`.** A backend that
-  simply doesn't implement prompts or resources (e.g. a tools-only server) answers with a normal
-  JSON-RPC `Method not found`, but that isn't one of `resilient.py`'s `_CONNECTION_ERRORS`, so it
-  falls through to the orchestrator's generic `except Exception` path and logs an ERROR with a
-  full traceback — on every client connection that does capability discovery. Not a fault, just
-  mis-leveled. Worth a real fix (recognize "unsupported method" distinctly, log it quietly) once
-  we're touching that error-handling path again.
+- **Prompts and resources exposed as tools.** Some clients use only tools and never read prompts
+  or resources. Presenting the backend's prompts and resources as tools would reach those
+  clients; since parity allows no item of the proxy's own besides `backend_status`, it would
+  be opt-in.
 
 ## Not planned
 
@@ -87,3 +128,12 @@ still can't delay the serialized queue.
 - **Authenticating the proxy's own clients.** It's a local, loopback-scoped service. (Container
   deployment may make this worth revisiting.)
 - **Publishing to a package index.** Deployment recipes, yes; distribution, no.
+
+[#1]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/1
+[#2]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/2
+[#3]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/3
+[#4]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/4
+[#5]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/5
+[#6]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/6
+[#7]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/7
+[#8]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/8
