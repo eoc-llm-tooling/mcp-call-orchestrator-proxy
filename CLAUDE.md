@@ -48,7 +48,9 @@ client → FastMCP + ProxyProvider (server.py) → ExposureAuditBackend (exposur
 
 A client's `initialize` and `server/discover` never go down that chain:
 `BackendMetadataMiddleware` (`metadata.py`) answers them from what `ResilientBackend` last
-negotiated with the backend.
+negotiated with the backend. Nor does the MCP SDK's `Mcp-Param-*` header check on a 2026-07-28
+tool call: `ListedToolSchemas` (`tool_schemas.py`) answers its schema lookup from the tool list
+the proxy last served.
 
 Exposure control is two modules: `exposure.py` resolves the allow/deny settings and enforces
 them as FastMCP visibility on the server; `exposure_audit.py` is the pass-through layer above
