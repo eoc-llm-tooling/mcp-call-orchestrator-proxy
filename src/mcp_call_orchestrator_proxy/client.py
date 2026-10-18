@@ -22,9 +22,11 @@ and TLS settings this module applies.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import httpx2
 from fastmcp import Client
 from fastmcp.client.transports import (
     ClientTransport,
@@ -38,6 +40,9 @@ from mcp_call_orchestrator_proxy.config import ProxySettings
 
 _UNSUPPORTED_ENTRY_KEYS = ("tools", "include_tags", "exclude_tags")
 
+# How much longer the backend HTTP client waits on a read than a call may take.
+_HTTP_READ_GRACE_SECONDS = 5.0
+
 
 def build_real_backend_client(settings: ProxySettings) -> Client[Any]:
     """Build a fastmcp Client for the configured backend.
@@ -46,7 +51,9 @@ def build_real_backend_client(settings: ProxySettings) -> Client[Any]:
     `verify=False` disables TLS verification for a self-signed cert.
     `init_timeout` bounds a single connect/initialize attempt so the resilient
     supervisor's retry loop stays responsive when the backend is slow or absent.
+    `timeout` bounds each call; a call that exceeds it fails alone.
     """
+    client: Client[Any]
     if settings.backend_config:
         transport = _single_server_transport(settings.backend_config)
         kwargs: dict[str, Any] = {
@@ -56,15 +63,59 @@ def build_real_backend_client(settings: ProxySettings) -> Client[Any]:
         # `verify` only applies to HTTP transports; a stdio backend has no TLS.
         if isinstance(transport, StreamableHttpTransport | SSETransport):
             kwargs["verify"] = settings.backend_verify_tls
-        return Client(transport, **kwargs)
+        client = Client(transport, **kwargs)
+    else:
+        client = Client(
+            settings.backend_mcp_url,
+            auth=settings.backend_api_key,
+            verify=settings.backend_verify_tls,
+            timeout=settings.call_timeout_seconds,
+            init_timeout=settings.connect_timeout_seconds,
+        )
+    if isinstance(client.transport, StreamableHttpTransport):
+        client.transport.httpx_client_factory = _http_client_factory(
+            verify=settings.backend_verify_tls,
+            read_timeout=settings.call_timeout_seconds + _HTTP_READ_GRACE_SECONDS,
+        )
+    return client
 
-    return Client(
-        settings.backend_mcp_url,
-        auth=settings.backend_api_key,
-        verify=settings.backend_verify_tls,
-        timeout=settings.call_timeout_seconds,
-        init_timeout=settings.connect_timeout_seconds,
-    )
+
+def _http_client_factory(
+    *, verify: bool, read_timeout: float
+) -> Callable[..., httpx2.AsyncClient]:
+    """Build the backend's HTTP client with a read timeout longer than a call.
+
+    A call that outlasts its timeout is cancelled by the queue (the MCP request
+    timeout, of the same length, is the backstop), and the MCP SDK then
+    abandons that one request, aborting its HTTP request on a 2026-07-28
+    connection. `fastmcp.Client` would otherwise set the HTTP read timeout to
+    the call timeout as well; when it fires first on a 2026-07-28 connection,
+    whose answers are not streamed, the SDK's transport fails as a whole and
+    ends the connection under every call queued behind the hung one. FastMCP
+    ignores `verify` once a factory is set, so the factory applies it.
+    """
+
+    def factory(
+        headers: dict[str, str] | None = None,
+        timeout: httpx2.Timeout | None = None,
+        auth: httpx2.Auth | None = None,
+        **kwargs: Any,
+    ) -> httpx2.AsyncClient:
+        base = timeout or httpx2.Timeout(30.0)
+        return httpx2.AsyncClient(
+            headers=headers,
+            auth=auth,
+            verify=verify,
+            timeout=httpx2.Timeout(
+                connect=base.connect,
+                read=read_timeout,
+                write=base.write,
+                pool=base.pool,
+            ),
+            **kwargs,
+        )
+
+    return factory
 
 
 def _single_server_transport(config_path: str) -> ClientTransport:

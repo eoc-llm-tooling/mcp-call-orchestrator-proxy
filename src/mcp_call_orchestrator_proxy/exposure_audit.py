@@ -48,11 +48,10 @@ class ExposureAuditBackend:
     ) -> None:
         return None
 
-    async def initialize(self) -> mcp_types.InitializeResult:
-        return await self._upstream.initialize()
-
-    async def ping(self) -> bool:
-        return await self._upstream.ping()
+    @property
+    def protocol_version(self) -> str | None:
+        """``None``: see ``MCPBackendClient.protocol_version``."""
+        return None
 
     async def list_tools(self) -> list[mcp_types.Tool]:
         result = await self._upstream.list_tools()
@@ -77,14 +76,14 @@ class ExposureAuditBackend:
 
     async def list_resource_templates(self) -> list[mcp_types.ResourceTemplate]:
         result = await self._upstream.list_resource_templates()
-        self._seen_template_uris = {t.uriTemplate for t in result}
+        self._seen_template_uris = {t.uri_template for t in result}
         self._maybe_check_resources()
         return result
 
-    async def read_resource(
-        self, uri: str
-    ) -> list[mcp_types.TextResourceContents | mcp_types.BlobResourceContents]:
-        return await self._upstream.read_resource(uri)
+    async def read_resource_mcp(
+        self, uri: str, meta: dict[str, Any] | None = None
+    ) -> mcp_types.ReadResourceResult:
+        return await self._upstream.read_resource_mcp(uri, meta=meta)
 
     async def list_prompts(self) -> list[mcp_types.Prompt]:
         result = await self._upstream.list_prompts()
@@ -92,9 +91,13 @@ class ExposureAuditBackend:
         return result
 
     async def get_prompt(
-        self, name: str, arguments: dict[str, Any] | None = None
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> mcp_types.GetPromptResult:
-        return await self._upstream.get_prompt(name, arguments)
+        return await self._upstream.get_prompt(name, arguments, meta=meta)
 
     def _check_simple(self, surface: Surface, real: set[str]) -> None:
         if self._policies[surface].mode == PolicyMode.UNSET:

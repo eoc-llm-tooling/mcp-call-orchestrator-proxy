@@ -5,11 +5,10 @@ layer performs against it is routed through a `CallOrchestrator`,
 serializing (or bounding the concurrency of) calls to the real backend.
 
 FastMCP opens `async with client:` around every single backend
-touchpoint (tool calls, all discovery, resource reads, prompt renders,
-ping, initialize). This facade's own `__aenter__`/`__aexit__` are
-no-ops: the one real connection is opened and closed exactly once, for
-the lifetime of the app, via the composition root's lifespan hook - not
-per call.
+touchpoint (tool calls, all discovery, resource reads, prompt renders).
+This facade's own `__aenter__`/`__aexit__` are no-ops: the one real
+connection is opened and closed exactly once, for the lifetime of the app,
+via the composition root's lifespan hook - not per call.
 
 This is also where a call is attributed to the client that made it: naming
 the caller means reading MCP's request context, which is knowledge the
@@ -20,14 +19,18 @@ generic queue below deliberately does not have. The label is handed down to
 from __future__ import annotations
 
 import itertools
-from collections.abc import MutableMapping
+import weakref
 from typing import Any
-from weakref import WeakKeyDictionary
 
+from fastmcp.server.dependencies import get_context
 from mcp import types as mcp_types
+from mcp.types.version import MODERN_PROTOCOL_VERSIONS
 
 from mcp_call_orchestrator_proxy.interfaces import MCPBackendClient
 from mcp_call_orchestrator_proxy.orchestrator import CallOrchestrator
+
+_UNNAMED_CLIENT = "client"
+_PROXY_CALLER = "proxy"
 
 
 class QueuedMCPBackend:
@@ -39,35 +42,46 @@ class QueuedMCPBackend:
         self._upstream = upstream
         self._orchestrator = orchestrator
 
-        # Session -> log tag. Weak keys so a disconnecting client's session is
-        # still collectable; the counter is what makes the tag *stable*. An
-        # id()-derived tag would not be: CPython reuses the address of a freed
-        # session, so on an always-on proxy two unrelated clients minutes apart
-        # would log under the same name and the attribution would be a lie.
-        self._session_tags: MutableMapping[object, str] = WeakKeyDictionary()
+        # Session -> log tag, keyed by the identity of the session's `initialize`
+        # params: the one object that lives exactly as long as the session (the
+        # SDK builds a new session wrapper per request). The entry is dropped when
+        # that object is collected, so its id() can never be reused for another
+        # session while the entry exists; the counter is what keeps a tag unique.
+        self._session_tags: dict[int, str] = {}
         self._session_seq = itertools.count(1)
+
+    @property
+    def protocol_version(self) -> str | None:
+        """``None``: see ``MCPBackendClient.protocol_version``."""
+        return None
 
     def _client_label(self) -> str:
         """Name the client whose request is being served, for log attribution.
 
-        Best-effort by design: discovery calls the proxy makes for itself, and
-        anything before a session exists, have no request context. That is not a
-        fault, so it degrades to a placeholder rather than raising.
+        The name is the one the client gives in ``clientInfo``, or ``client``.
+        Before 2026-07-28 it is followed by a number per session, taken at
+        ``initialize``. From 2026-07-28 on there is no session, so two instances
+        of one client log under the same name. A call with no client request
+        behind it is the proxy's own and is tagged ``proxy``.
         """
         try:
-            from mcp.server.lowlevel.server import request_ctx
+            request = get_context().request_context
+        except RuntimeError:
+            request = None
+        if request is None:
+            return _PROXY_CALLER
 
-            session = request_ctx.get().session
-        except (ImportError, LookupError):
-            return "no-session"
+        params = request.session.client_params
+        name = (params.client_info.name if params else None) or _UNNAMED_CLIENT
+        if params is None or request.protocol_version in MODERN_PROTOCOL_VERSIONS:
+            return name
 
-        tag = self._session_tags.get(session)
+        key = id(params)
+        tag = self._session_tags.get(key)
         if tag is None:
-            params = getattr(session, "client_params", None)
-            info = getattr(params, "clientInfo", None)
-            name = getattr(info, "name", None) or "client"
             tag = f"{name}-{next(self._session_seq):03d}"
-            self._session_tags[session] = tag
+            self._session_tags[key] = tag
+            weakref.finalize(params, self._session_tags.pop, key, None)
         return tag
 
     async def __aenter__(self) -> QueuedMCPBackend:
@@ -77,18 +91,6 @@ class QueuedMCPBackend:
         self, exc_type: object, exc_val: object, exc_tb: object
     ) -> None:
         return None
-
-    async def initialize(self) -> mcp_types.InitializeResult:
-        return await self._orchestrator.submit(
-            self._upstream.initialize,
-            label="initialize",
-            client=self._client_label(),
-        )
-
-    async def ping(self) -> bool:
-        return await self._orchestrator.submit(
-            self._upstream.ping, label="ping", client=self._client_label()
-        )
 
     async def list_tools(self) -> list[mcp_types.Tool]:
         return await self._orchestrator.submit(
@@ -124,11 +126,11 @@ class QueuedMCPBackend:
             client=self._client_label(),
         )
 
-    async def read_resource(
-        self, uri: str
-    ) -> list[mcp_types.TextResourceContents | mcp_types.BlobResourceContents]:
+    async def read_resource_mcp(
+        self, uri: str, meta: dict[str, Any] | None = None
+    ) -> mcp_types.ReadResourceResult:
         return await self._orchestrator.submit(
-            lambda: self._upstream.read_resource(uri),
+            lambda: self._upstream.read_resource_mcp(uri, meta=meta),
             label="read_resource",
             client=self._client_label(),
         )
@@ -141,10 +143,14 @@ class QueuedMCPBackend:
         )
 
     async def get_prompt(
-        self, name: str, arguments: dict[str, Any] | None = None
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> mcp_types.GetPromptResult:
         return await self._orchestrator.submit(
-            lambda: self._upstream.get_prompt(name, arguments),
+            lambda: self._upstream.get_prompt(name, arguments, meta=meta),
             label=f"get_prompt:{name}",
             client=self._client_label(),
         )

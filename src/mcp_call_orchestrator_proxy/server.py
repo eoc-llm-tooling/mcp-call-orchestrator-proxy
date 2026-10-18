@@ -1,8 +1,9 @@
 """FastMCP server construction for the proxy.
 
-Wraps the queue-aware backend facade in FastMCP's own `FastMCPProxy`,
-which mirrors upstream tools/resources/prompts using their exact
-original JSON schema - no lossy `arguments: dict` wrapper.
+A plain `FastMCP` server with FastMCP's `ProxyProvider` over the queue-aware
+backend facade, which mirrors upstream tools/resources/prompts using their
+exact original JSON schema - no lossy `arguments: dict` wrapper - and the
+proxy's own `BackendMetadataMiddleware` for `initialize` and `server/discover`.
 """
 
 from __future__ import annotations
@@ -12,37 +13,41 @@ from contextlib import AbstractAsyncContextManager
 from typing import Any, cast
 
 from fastmcp import Client, FastMCP
-from fastmcp.server.providers.proxy import FastMCPProxy
+from fastmcp.server.providers.proxy import ProxyProvider
 
 from mcp_call_orchestrator_proxy.interfaces import MCPBackendClient
+from mcp_call_orchestrator_proxy.metadata import BackendMetadataMiddleware
+from mcp_call_orchestrator_proxy.resilient import BackendMetadata
 
 
 def build_proxy_server(
     backend_factory: Callable[[], MCPBackendClient],
     *,
+    metadata: Callable[[], BackendMetadata | None],
     server_name: str = "mcp-call-orchestrator-proxy",
     lifespan: Callable[[FastMCP], AbstractAsyncContextManager[None]] | None = None,
-) -> FastMCPProxy:
-    """Create a FastMCP proxy server that mirrors the backend's exact tool schemas.
+) -> FastMCP:
+    """Create a FastMCP server that mirrors the backend's exact tool schemas.
 
-    Bypasses `create_proxy()` deliberately: its internal client-factory
-    inference treats non-`Client` targets as raw transports to wrap in a
-    fresh `ProxyClient`, which would mishandle our queue-aware facade.
-    Passing `client_factory` to `FastMCPProxy` directly works because
-    every backend touchpoint in `fastmcp.server.providers.proxy` only
-    relies on the facade's structural (duck-typed) compatibility with
-    `Client`, never an `isinstance` check.
+    Not `FastMCPProxy` and not `create_proxy()`: `create_proxy()` treats a
+    non-`Client` target as a raw transport to wrap in a fresh `ProxyClient`,
+    and `FastMCPProxy` installs `ProxyMetadataMiddleware`, which reads backend
+    client internals and calls the backend on every client handshake, outside
+    the proxy's queue. `ProxyProvider` relies on the facade only structurally
+    (duck-typed against `Client`), never through an `isinstance` check.
+
+    `metadata` returns what the backend last negotiated; it is read locally on
+    each client handshake and never calls the backend.
     """
-    return FastMCPProxy(
-        client_factory=cast(Callable[[], Client[Any]], backend_factory),
-        # "warn" (not "raise") so a down backend is skipped in list_tools
-        # aggregation instead of failing the whole listing - this keeps the
-        # proxy-native backend_status tool discoverable while the backend is
-        # absent ("stay connectable, degrade").
-        provider_error_strategy="warn",
+    server = FastMCP(
+        name=server_name,
+        lifespan=lifespan,
+        middleware=[BackendMetadataMiddleware(metadata)],
         # FastMCP inlines `$ref`/`$defs` by default; schemas pass through as the
         # backend wrote them, so their structure stays the backend's own.
         dereference_schemas=False,
-        name=server_name,
-        lifespan=lifespan,
     )
+    # A down backend's listing failure is logged and skipped (FastMCP's "warn"
+    # default for providers), so the listing still carries `backend_status`.
+    server.add_provider(ProxyProvider(cast(Callable[[], Client[Any]], backend_factory)))
+    return server

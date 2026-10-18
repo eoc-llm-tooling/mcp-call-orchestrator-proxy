@@ -6,8 +6,9 @@ clients.
 
 Some MCP servers have session-routing bugs or no call serialization, so two
 concurrent MCP clients (e.g. two agents, or an agent plus a manual test) can
-hang or step on each other. This proxy terminates each client's MCP session,
-serializes the calls it forwards to the one backend, and exposes the backend's
+hang or step on each other. This proxy is the backend's only client: it ends
+each client's requests at itself, serializes the calls it forwards to the one
+backend, and exposes the backend's
 **exact same tools with exact schema parity** — so clients see a well-behaved
 server, unchanged except for the added stability.
 
@@ -15,8 +16,15 @@ server, unchanged except for the added stability.
 
 - **Exact tool parity** — mirrors the backend's tools with identical names and
   schemas; nothing to keep in sync by hand.
-- **Multi-session safe** — independent MCP clients can connect over HTTP at the
+- **Multi-client safe** — independent MCP clients can connect over HTTP at the
   same time without cross-talk or hangs.
+- **Current MCP protocol versions, both kinds** — clients on the session-based
+  versions (up to 2025-11-25, opening with `initialize`) and on the sessionless
+  2026-07-28 version are served side by side, and the backend's version is
+  negotiated automatically, so any client reaches a backend of either kind.
+- **The backend's guidance is passed on** — clients receive the backend's server
+  `instructions`, and are offered only the capabilities the backend has (tools
+  always, for `backend_status`).
 - **Call serialization** — calls to the backend are queued and orchestrated
   (configurable concurrency) instead of racing each other.
 - **Resilient to the backend coming and going** — starts cleanly whether or not
@@ -127,12 +135,12 @@ these instead. `MCP_PROXY_BACKEND_API_KEY` is required in this mode.
 | `MCP_PROXY_BACKEND_API_KEY` | *(required in Option 2)* | Bearer token for the backend. |
 | `MCP_PROXY_BACKEND_MCP_URL` | `https://127.0.0.1:27124/mcp/` | Backend's Streamable HTTP MCP endpoint. |
 | `MCP_PROXY_BACKEND_VERIFY_TLS` | `false` | Verify the backend's TLS cert. `false` is normal for a self-signed cert. |
-| `MCP_PROXY_SERVER_NAME` | `mcp-call-orchestrator-proxy` | Name the proxy reports as its MCP server identity (the `initialize` handshake). Some MCP clients (e.g. VS Code/Copilot's tool picker) label/dedupe servers by this rather than by the key you gave the entry in your own client config - set a unique value per instance when running more than one, or they'll look identical to those clients. |
+| `MCP_PROXY_SERVER_NAME` | `mcp-call-orchestrator-proxy` | Name the proxy reports as its MCP server identity (the `initialize` handshake, or `server/discover`). Some MCP clients (e.g. VS Code/Copilot's tool picker) label/dedupe servers by this rather than by the key you gave the entry in your own client config - set a unique value per instance when running more than one, or they'll look identical to those clients. |
 | `MCP_PROXY_LISTEN_HOST` | `127.0.0.1` | Host the proxy itself binds to. |
 | `MCP_PROXY_LISTEN_PORT` | `27125` | Port the proxy itself listens on. |
 | `MCP_PROXY_MAX_CONCURRENT_CALLS` | `1` | Concurrent calls allowed to the backend (`1` = fully serialized). |
-| `MCP_PROXY_CALL_TIMEOUT_SECONDS` | `120` | Timeout for a single backend tool call. |
-| `MCP_PROXY_CONNECT_TIMEOUT_SECONDS` | `30` | Timeout for a single backend connect/initialize attempt. |
+| `MCP_PROXY_CALL_TIMEOUT_SECONDS` | `120` | Timeout for a single backend tool call. A call that exceeds it fails alone; the calls queued behind it still run. |
+| `MCP_PROXY_CONNECT_TIMEOUT_SECONDS` | `30` | Timeout for a single backend connect attempt, protocol negotiation included. |
 | `MCP_PROXY_RECONNECT_INITIAL_BACKOFF_SECONDS` | `1` | First delay before retrying a failed connection. |
 | `MCP_PROXY_RECONNECT_MAX_BACKOFF_SECONDS` | `30` | Cap on the exponential reconnect backoff. |
 | `MCP_PROXY_RECONNECT_BACKOFF_MULTIPLIER` | `2` | Growth factor applied to the backoff after each failure. |
@@ -239,6 +247,12 @@ in the same guide.
 only the operator can fix: a misconfigured exposure filter, a call the backend never answered;
 `INFO` adds a record per call as it's queued and as it completes; `DEBUG` adds internal
 detail for fault-finding.
+
+Each per-call record names the client by the name it gives itself (`clientInfo`):
+`<name>-<nnn>` for a client on a session-based protocol version, one number per
+session; plain `<name>` for a client on 2026-07-28, which has no session, so two
+instances of one client share it; `client` for a client that gives no name; and
+`proxy` for a call the proxy makes on its own.
 
 Records go to stdout/stderr, so under systemd they land in the journal:
 

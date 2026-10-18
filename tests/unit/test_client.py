@@ -14,11 +14,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+import httpx2
 import pytest
 from fastmcp.client.auth.bearer import BearerAuth
 from fastmcp.client.transports import StdioTransport
 from fastmcp.client.transports.http import StreamableHttpTransport
 
+from mcp_call_orchestrator_proxy import client as client_module
 from mcp_call_orchestrator_proxy.app import create_proxy_app
 from mcp_call_orchestrator_proxy.client import build_real_backend_client
 from mcp_call_orchestrator_proxy.config import ProxySettings
@@ -175,3 +177,38 @@ def test_a_config_without_exactly_one_server_stops_the_proxy_at_startup(
 
     with pytest.raises(ValueError, match=f"found {len(servers)}"):
         create_proxy_app(settings=ProxySettings(backend_config=str(config_path)))
+
+
+@pytest.mark.parametrize("verify", [True, False])
+@pytest.mark.parametrize("source", ["config", "fields"])
+def test_the_backend_http_client_reads_longer_than_a_call_may_take(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, verify: bool
+) -> None:
+    """A call that outlasts its timeout must fail on the call timeout, not on the
+    HTTP read timeout, which would end the whole connection; the TLS setting
+    must survive the custom HTTP client."""
+    url = "https://127.0.0.1:27124/mcp/"
+    common: dict[str, Any] = {"call_timeout_seconds": 7.0, "backend_verify_tls": verify}
+    if source == "config":
+        settings = ProxySettings(
+            backend_config=_write_config(tmp_path, {"url": url}), **common
+        )
+    else:
+        settings = ProxySettings(
+            backend_mcp_url=url, backend_api_key="a" * 32, **common
+        )
+    built: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        client_module.httpx2, "AsyncClient", lambda **kwargs: built.append(kwargs)
+    )
+
+    client = build_real_backend_client(settings)
+    assert isinstance(client.transport, StreamableHttpTransport)
+    factory = client.transport.httpx_client_factory
+    assert factory is not None
+    factory(timeout=httpx2.Timeout(30.0, read=7.0))
+
+    (kwargs,) = built
+    assert kwargs["verify"] is verify
+    assert kwargs["timeout"].read > settings.call_timeout_seconds
+    assert kwargs["timeout"].connect == 30.0

@@ -17,8 +17,8 @@ from typing import Any, TypeVar
 
 import pytest
 from mcp import types as mcp_types
-from mcp.server.lowlevel.server import request_ctx
 
+from mcp_call_orchestrator_proxy import backend as backend_module
 from mcp_call_orchestrator_proxy.backend import QueuedMCPBackend
 from mcp_call_orchestrator_proxy.orchestrator import CallOrchestrator
 
@@ -50,19 +50,9 @@ class FakeUpstream:
         self.active -= 1
         return result
 
-    async def initialize(self) -> mcp_types.InitializeResult:
-        self.calls.append("initialize")
-        return await self._simulate(
-            mcp_types.InitializeResult(
-                protocolVersion="2025-06-18",
-                capabilities=mcp_types.ServerCapabilities(),
-                serverInfo=mcp_types.Implementation(name="fake", version="0"),
-            )
-        )
-
-    async def ping(self) -> bool:
-        self.calls.append("ping")
-        return await self._simulate(True)
+    @property
+    def protocol_version(self) -> str | None:
+        return "2026-07-28"
 
     async def list_tools(self) -> list[mcp_types.Tool]:
         self.calls.append("list_tools")
@@ -89,18 +79,24 @@ class FakeUpstream:
         self.calls.append("list_resource_templates")
         return await self._simulate([])
 
-    async def read_resource(self, uri: str) -> list[Any]:
-        self.calls.append(f"read_resource:{uri}")
-        return await self._simulate([])
+    async def read_resource_mcp(
+        self, uri: str, meta: dict[str, Any] | None = None
+    ) -> mcp_types.ReadResourceResult:
+        self.calls.append(f"read_resource_mcp:{uri}:{meta}")
+        return await self._simulate(mcp_types.ReadResourceResult(contents=[]))
 
     async def list_prompts(self) -> list[mcp_types.Prompt]:
         self.calls.append("list_prompts")
         return await self._simulate([])
 
     async def get_prompt(
-        self, name: str, arguments: dict[str, Any] | None = None
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> mcp_types.GetPromptResult:
-        self.calls.append(f"get_prompt:{name}")
+        self.calls.append(f"get_prompt:{name}:{meta}")
         return await self._simulate(mcp_types.GetPromptResult(messages=[]))
 
 
@@ -121,25 +117,28 @@ async def test_facade_delegates_all_backend_methods() -> None:
     upstream = FakeUpstream()
     async with CallOrchestrator() as orch:
         backend = QueuedMCPBackend(upstream, orch)
-        await backend.initialize()
-        await backend.ping()
         await backend.list_tools()
         await backend.list_resources()
         await backend.list_resource_templates()
-        await backend.read_resource("res://x")
+        await backend.read_resource_mcp("res://x", meta={"k": "v"})
         await backend.list_prompts()
-        await backend.get_prompt("greet", {"name": "a"})
+        await backend.get_prompt("greet", {"name": "a"}, meta={"k": "v"})
 
     assert upstream.calls == [
-        "initialize",
-        "ping",
         "list_tools",
         "list_resources",
         "list_resource_templates",
-        "read_resource:res://x",
+        "read_resource_mcp:res://x:{'k': 'v'}",
         "list_prompts",
-        "get_prompt:greet",
+        "get_prompt:greet:{'k': 'v'}",
     ]
+
+
+def test_facade_reports_no_protocol_version_whatever_the_backend_negotiated() -> None:
+    """FastMCP's provider calls the backend's session directly for a 2026-07-28+
+    version, which would bypass the queue; the facade must never report one."""
+    backend = QueuedMCPBackend(FakeUpstream(), CallOrchestrator())
+    assert backend.protocol_version is None
 
 
 @pytest.mark.asyncio
@@ -173,44 +172,80 @@ async def test_facade_aenter_aexit_are_no_ops() -> None:
     assert upstream.exit_count == 0
 
 
-class FakeSession:
-    """Stands in for MCP's ServerSession - only what the label logic reads."""
+HANDSHAKE_VERSION = "2025-11-25"
+MODERN_VERSION = "2026-07-28"
 
-    def __init__(self, client_name: str) -> None:
-        self.client_params = SimpleNamespace(
-            clientInfo=SimpleNamespace(name=client_name)
-        )
+
+def client_params(name: str) -> mcp_types.InitializeRequestParams:
+    """What the SDK records for a client, from ``initialize`` or a request envelope."""
+    return mcp_types.InitializeRequestParams(
+        protocol_version=HANDSHAKE_VERSION,
+        capabilities=mcp_types.ClientCapabilities(),
+        client_info=mcp_types.Implementation(name=name, version="1"),
+    )
 
 
 @contextmanager
-def serving(session: FakeSession) -> Iterator[None]:
-    """Pretend we are inside an MCP request from `session`."""
-    token = request_ctx.set(SimpleNamespace(session=session))  # type: ignore[arg-type]
-    try:
+def serving(
+    monkeypatch: pytest.MonkeyPatch,
+    params: mcp_types.InitializeRequestParams | None,
+    protocol_version: str = HANDSHAKE_VERSION,
+) -> Iterator[None]:
+    """Pretend we are inside an MCP request from a client with ``params``.
+
+    The SDK builds a fresh session object for every request; only the client's
+    params object is shared by the requests of one handshake-era session.
+    """
+    request = SimpleNamespace(
+        session=SimpleNamespace(client_params=params),
+        protocol_version=protocol_version,
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            backend_module,
+            "get_context",
+            lambda: SimpleNamespace(request_context=request),
+        )
         yield
-    finally:
-        request_ctx.reset(token)
 
 
-def test_a_client_keeps_one_name_for_the_life_of_its_session() -> None:
+def test_a_client_keeps_one_name_for_the_life_of_its_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Attribution is worthless if a client's name drifts between its own calls."""
     backend = QueuedMCPBackend(FakeUpstream(), CallOrchestrator())
-    session = FakeSession("agent")
+    params = client_params("agent")
 
-    with serving(session):
+    with serving(monkeypatch, params):
         first = backend._client_label()
+    with serving(monkeypatch, params):
         second = backend._client_label()
 
-    assert first == second
-    assert "agent" in first
+    assert first == second == "agent-001"
 
 
-def test_a_disconnected_client_never_lends_its_name_to_the_next_one() -> None:
+def test_two_sessions_of_one_client_get_different_numbers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = QueuedMCPBackend(FakeUpstream(), CallOrchestrator())
+    first, second = client_params("agent"), client_params("agent")
+
+    with serving(monkeypatch, first):
+        first_tag = backend._client_label()
+    with serving(monkeypatch, second):
+        second_tag = backend._client_label()
+
+    assert (first_tag, second_tag) == ("agent-001", "agent-002")
+
+
+def test_a_disconnected_client_never_lends_its_name_to_the_next_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The tag must stay unique for the process lifetime, not just while the
     session is alive.
 
     This is the trap an id()-derived tag falls into: CPython reuses the memory
-    address of a collected session, so on an always-on proxy - where clients
+    address of a collected object, so on an always-on proxy - where clients
     connect and disconnect all day - two unrelated agents end up logging under
     the same name, and a day-old log attributes one client's calls to another.
     Here each session is dropped and collected before the next is made, which is
@@ -220,21 +255,49 @@ def test_a_disconnected_client_never_lends_its_name_to_the_next_one() -> None:
     seen: list[str] = []
 
     for _ in range(50):
-        session = FakeSession("agent")
-        with serving(session):
+        params = client_params("agent")
+        with serving(monkeypatch, params):
             seen.append(backend._client_label())
-        del session
+        del params
         gc.collect()  # the client has gone; its session is now collectable
 
     assert len(set(seen)) == 50, (
         "sequential clients shared a log identity: "
         f"{len(seen) - len(set(seen))} collision(s) in {len(seen)} sessions"
     )
+    assert backend._session_tags == {}, "a collected session's tag was kept"
 
 
-def test_a_call_with_no_session_behind_it_is_still_named() -> None:
-    """Discovery the proxy performs for itself has no request context. That is
-    normal, not a fault, so it must degrade to a placeholder rather than raise.
+def test_a_sessionless_client_is_named_without_a_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """From 2026-07-28 there is no session: the tag is the name the request
+    carries, and two instances of one client share it."""
+    backend = QueuedMCPBackend(FakeUpstream(), CallOrchestrator())
+
+    with serving(monkeypatch, client_params("agent"), MODERN_VERSION):
+        first = backend._client_label()
+    with serving(monkeypatch, client_params("agent"), MODERN_VERSION):
+        second = backend._client_label()
+
+    assert first == second == "agent"
+
+
+@pytest.mark.parametrize("protocol_version", [HANDSHAKE_VERSION, MODERN_VERSION])
+def test_a_client_that_gives_no_name_is_called_client(
+    monkeypatch: pytest.MonkeyPatch, protocol_version: str
+) -> None:
+    backend = QueuedMCPBackend(FakeUpstream(), CallOrchestrator())
+
+    with serving(monkeypatch, None, protocol_version):
+        assert backend._client_label() == "client"
+    with serving(monkeypatch, client_params(""), protocol_version):
+        assert backend._client_label().startswith("client")
+
+
+def test_a_call_with_no_client_request_behind_it_is_the_proxys() -> None:
+    """A call the proxy makes for itself has no request context. That is normal,
+    not a fault, so it is named rather than raising.
     """
     backend = QueuedMCPBackend(FakeUpstream(), CallOrchestrator())
-    assert backend._client_label() == "no-session"
+    assert backend._client_label() == "proxy"

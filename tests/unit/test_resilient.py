@@ -7,8 +7,8 @@ Backoff values are tiny so the supervisor's retry loop runs fast.
 Verifies the resilience contract:
 - starts cleanly when the backend is absent (``__aenter__`` never raises);
 - a call while down returns a clean ``BackendUnavailableError``;
-- ``initialize()`` while down returns a synthetic result (never raises), so an
-  agent can still connect to the proxy;
+- what the backend negotiated is recorded on connect and kept while it is down,
+  so the proxy can answer its own clients' handshakes from it;
 - connects on its own when the backend appears;
 - reconnects after a mid-session drop;
 - shuts down *promptly* even mid-backoff, and cleanly while connected.
@@ -21,11 +21,12 @@ import time
 from typing import Any
 
 import pytest
+from mcp import MCPError
 from mcp import types as mcp_types
-from mcp.shared.exceptions import McpError
 
-from mcp_call_orchestrator_proxy.interfaces import MCPBackendClient
+from mcp_call_orchestrator_proxy.interfaces import NegotiatedBackendClient
 from mcp_call_orchestrator_proxy.resilient import (
+    BackendMetadata,
     BackendUnavailableError,
     MethodNotSupportedError,
     ResilientBackend,
@@ -38,21 +39,27 @@ class BackendController:
     def __init__(self) -> None:
         self.connect_ok = True
         self.tool_error: Exception | None = None
+        self.instructions: str | None = "BACKEND INSTRUCTIONS"
+        self.protocol_version = "2026-07-28"
+        self.capabilities = mcp_types.ServerCapabilities(
+            tools=mcp_types.ToolsCapability()
+        )
         self.built: list[FakeClient] = []
 
-    def __call__(self) -> MCPBackendClient:
+    def __call__(self) -> NegotiatedBackendClient:
         client = FakeClient(self)
         self.built.append(client)
         return client
 
 
 class FakeClient:
-    """A controllable backend client honoring the ``MCPBackendClient`` protocol."""
+    """A controllable backend client honoring ``NegotiatedBackendClient``."""
 
     def __init__(self, controller: BackendController) -> None:
         self._controller = controller
         self.entered = False
         self.exited = False
+        self.listings = 0
 
     async def __aenter__(self) -> FakeClient:
         if not self._controller.connect_ok:
@@ -66,22 +73,25 @@ class FakeClient:
     def is_connected(self) -> bool:
         return self.entered and not self.exited
 
-    async def initialize(self) -> mcp_types.InitializeResult:
-        return mcp_types.InitializeResult(
-            protocolVersion="2025-06-18",
-            capabilities=mcp_types.ServerCapabilities(),
-            serverInfo=mcp_types.Implementation(name="fake", version="0"),
-        )
+    @property
+    def protocol_version(self) -> str | None:
+        return self._controller.protocol_version if self.is_connected() else None
 
-    async def ping(self) -> bool:
-        return True
+    @property
+    def server_capabilities(self) -> mcp_types.ServerCapabilities | None:
+        return self._controller.capabilities
+
+    @property
+    def instructions(self) -> str | None:
+        return self._controller.instructions
 
     async def list_tools(self) -> list[mcp_types.Tool]:
+        self.listings += 1
         return [
             mcp_types.Tool(
                 name="echo",
                 description="echo",
-                inputSchema={"type": "object", "properties": {}},
+                input_schema={"type": "object", "properties": {}},
             )
         ]
 
@@ -106,14 +116,20 @@ class FakeClient:
     async def list_resource_templates(self) -> list[mcp_types.ResourceTemplate]:
         return []
 
-    async def read_resource(self, uri: str) -> list[Any]:
-        return []
+    async def read_resource_mcp(
+        self, uri: str, meta: dict[str, Any] | None = None
+    ) -> mcp_types.ReadResourceResult:
+        return mcp_types.ReadResourceResult(contents=[])
 
     async def list_prompts(self) -> list[mcp_types.Prompt]:
         return []
 
     async def get_prompt(
-        self, name: str, arguments: dict[str, Any] | None = None
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> mcp_types.GetPromptResult:
         return mcp_types.GetPromptResult(messages=[])
 
@@ -159,10 +175,7 @@ async def test_starts_cleanly_when_backend_absent() -> None:
 
     async with _make_backend(controller) as backend:
         assert backend.status_snapshot()["connected"] is False
-
-        # initialize() must NOT raise - the proxy stays connectable while down.
-        result = await backend.initialize()
-        assert isinstance(result, mcp_types.InitializeResult)
+        assert backend.metadata is None
 
         # Operations that need the backend fail cleanly, not with a hang.
         with pytest.raises(BackendUnavailableError):
@@ -170,7 +183,66 @@ async def test_starts_cleanly_when_backend_absent() -> None:
         with pytest.raises(BackendUnavailableError):
             await backend.list_tools()
 
-        assert await backend.ping() is False
+
+@pytest.mark.asyncio
+async def test_records_what_the_backend_negotiated_and_keeps_it_while_down() -> None:
+    controller = BackendController()
+
+    async with _make_backend(controller) as backend:
+        assert await _wait_until(lambda: backend.status_snapshot()["connected"] is True)
+        connected = BackendMetadata(
+            protocol_version="2026-07-28",
+            capabilities=mcp_types.ServerCapabilities(
+                tools=mcp_types.ToolsCapability()
+            ),
+            instructions="BACKEND INSTRUCTIONS",
+        )
+        assert backend.metadata == connected
+
+        controller.connect_ok = False
+        controller.tool_error = RuntimeError("Server session was closed unexpectedly")
+        with pytest.raises(BackendUnavailableError):
+            await backend.call_tool_mcp("echo", {"value": "x"})
+        assert await _wait_until(
+            lambda: backend.status_snapshot()["consecutive_failures"] >= 1
+        )
+        assert backend.metadata == connected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("protocol_version", "has_tools", "listings"),
+    [("2026-07-28", True, 1), ("2025-11-25", True, 0), ("2026-07-28", False, 0)],
+    ids=["2026-with-tools", "2025", "2026-without-tools"],
+)
+async def test_a_new_2026_connection_lists_the_tools_before_it_serves(
+    protocol_version: str, has_tools: bool, listings: int
+) -> None:
+    """A 2026-07-28 client sends a tool's header arguments only for tools it has
+    listed, and FastMCP's tool cache outlives a reconnect: each new connection
+    lists them once, before any call can use it."""
+    controller = BackendController()
+    controller.protocol_version = protocol_version
+    if not has_tools:
+        controller.capabilities = mcp_types.ServerCapabilities()
+
+    async with _make_backend(controller) as backend:
+        assert await _wait_until(lambda: backend.status_snapshot()["connected"] is True)
+        assert controller.built[-1].listings == listings
+
+        controller.tool_error = RuntimeError("Server session was closed unexpectedly")
+        with pytest.raises(BackendUnavailableError):
+            await backend.call_tool_mcp("echo", {"value": "x"})
+        controller.tool_error = None
+        assert await _wait_until(lambda: len(controller.built) > 1)
+        assert await _wait_until(lambda: backend.status_snapshot()["connected"] is True)
+        assert controller.built[-1].listings == listings
+
+
+def test_reports_no_protocol_version_to_the_layers_above() -> None:
+    """See ``MCPBackendClient.protocol_version``: a modern version here would make
+    FastMCP's provider bypass the queue."""
+    assert _make_backend(BackendController()).protocol_version is None
 
 
 @pytest.mark.asyncio
@@ -227,12 +299,22 @@ async def test_reconnects_after_mid_session_drop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reconnects_after_a_terminated_session() -> None:
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        (mcp_types.INVALID_REQUEST, "Session terminated"),
+        (mcp_types.INVALID_REQUEST, "Session not found"),
+        (-32001, "Session not found"),
+    ],
+    ids=["sdk-stand-in", "python-sdk-server", "typescript-sdk-server"],
+)
+async def test_reconnects_after_a_terminated_session(code: int, message: str) -> None:
     """A backend that keeps its listener up but rejects the stale session answers
-    with a clean 404, which the SDK surfaces as ``McpError(32600, "Session
-    terminated")``. That is a broken connection, not a transport error, and it must
-    still force the supervisor to rebuild - the defect that once left the proxy
-    serving zero tools until a manual restart."""
+    with a clean 404. The SDK surfaces the JSON-RPC error the backend put in the
+    404's body (each MCP SDK's server words it its own way), or its own stand-in
+    when there is none. That is a broken connection, not a transport error, and
+    it must still force the supervisor to rebuild - the defect that once left the
+    proxy serving zero tools until a manual restart."""
     controller = BackendController()
 
     async with _make_backend(controller) as backend:
@@ -241,9 +323,7 @@ async def test_reconnects_after_a_terminated_session() -> None:
         assert first.content[0].text == "a"
         clients_before = len(controller.built)
 
-        controller.tool_error = McpError(
-            mcp_types.ErrorData(code=32600, message="Session terminated")
-        )
+        controller.tool_error = MCPError(code=code, message=message)
         with pytest.raises(BackendUnavailableError):
             await backend.call_tool_mcp("echo", {"value": "b"})
 
@@ -267,7 +347,7 @@ async def test_reconnects_after_a_terminated_session() -> None:
 async def test_reconnects_after_the_sdks_generic_connection_closed_signal() -> None:
     """A dead subprocess (a stdio backend's own failure mode) never reaches us as a
     raw transport error: the SDK's receive loop swallows the pipe closing and
-    drains every pending request with ``McpError(-32000, "Connection closed")``
+    drains every pending request with ``MCPError(-32000, "Connection closed")``
     instead. That generic signal must force a rebuild too, not just the
     streamable-HTTP-specific "session terminated" one."""
     controller = BackendController()
@@ -278,8 +358,8 @@ async def test_reconnects_after_the_sdks_generic_connection_closed_signal() -> N
         assert first.content[0].text == "a"
         clients_before = len(controller.built)
 
-        controller.tool_error = McpError(
-            mcp_types.ErrorData(code=-32000, message="Connection closed")
+        controller.tool_error = MCPError(
+            code=mcp_types.CONNECTION_CLOSED, message="Connection closed"
         )
         with pytest.raises(BackendUnavailableError):
             await backend.call_tool_mcp("echo", {"value": "b"})
@@ -301,9 +381,20 @@ async def test_reconnects_after_the_sdks_generic_connection_closed_signal() -> N
 
 
 @pytest.mark.asyncio
-async def test_ordinary_mcp_error_is_not_a_connection_break() -> None:
-    """An unknown or failed tool call also raises ``McpError``. Only the terminated-
-    session signal is a break; any other ``McpError`` is a per-call error that must
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        (-32602, "Invalid params"),
+        # The code a TypeScript SDK server gives a lost session, on another error.
+        (-32001, "Request 'tools/call' timed out"),
+    ],
+    ids=["invalid-params", "request-timeout"],
+)
+async def test_ordinary_mcp_error_is_not_a_connection_break(
+    code: int, message: str
+) -> None:
+    """An unknown or failed tool call also raises ``MCPError``. Only the terminated-
+    session signal is a break; any other ``MCPError`` is a per-call error that must
     propagate unchanged and leave the connection live - otherwise a single bad call
     would tear down the whole backend connection."""
     controller = BackendController()
@@ -312,16 +403,14 @@ async def test_ordinary_mcp_error_is_not_a_connection_break() -> None:
         assert await _wait_until(lambda: backend.status_snapshot()["connected"] is True)
         clients_before = len(controller.built)
 
-        controller.tool_error = McpError(
-            mcp_types.ErrorData(code=-32602, message="Invalid params")
-        )
-        with pytest.raises(McpError) as raised:
+        controller.tool_error = MCPError(code=code, message=message)
+        with pytest.raises(MCPError) as raised:
             await backend.call_tool_mcp("echo", {"value": "b"})
         assert raised.value is controller.tool_error
 
         # The connection is untouched: no rebuild, still reporting connected.
         assert len(controller.built) == clients_before, (
-            "an ordinary McpError wrongly tore down and rebuilt the connection"
+            "an ordinary MCPError wrongly tore down and rebuilt the connection"
         )
         assert backend.status_snapshot()["connected"] is True
 
@@ -337,7 +426,7 @@ async def test_method_not_found_is_raised_as_method_not_supported() -> None:
         clients_before = len(controller.built)
 
         error = mcp_types.ErrorData(code=-32601, message="Method not found")
-        controller.tool_error = McpError(error)
+        controller.tool_error = MCPError.from_error_data(error)
         with pytest.raises(MethodNotSupportedError) as raised:
             await backend.call_tool_mcp("echo", {"value": "b"})
         assert raised.value.error == error

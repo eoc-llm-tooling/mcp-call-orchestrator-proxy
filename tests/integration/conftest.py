@@ -122,7 +122,7 @@ async def probe_tool(real_client) -> tuple[str, dict[str, Any]]:
 
     # Prefer tool with no required args
     for tool in tools:
-        schema = tool.inputSchema or {}
+        schema = tool.input_schema or {}
         if not schema.get("required"):
             return tool.name, {}
 

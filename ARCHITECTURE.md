@@ -5,9 +5,10 @@
 The proxy makes a single, possibly-fragile backend MCP server safe for multiple
 concurrent MCP clients. It does three things and nothing more:
 
-1. **Session termination** — each client's MCP session terminates *at the proxy*. Clients
-   never share a session with the backend, so one client cannot corrupt or race another's
-   session state.
+1. **Session termination** — the proxy is the backend's only client. Every client's requests
+   end at the proxy, under whichever protocol version the client speaks, and the backend sees
+   one connection: the proxy's own. Clients never share a session or a connection with the
+   backend, so one client cannot corrupt or race another's state there.
 2. **Call serialization** — every operation forwarded to the backend passes through a
    single queue with a configurable concurrency limit (default `1` = fully serialized).
 3. **Resilience** — the proxy stays connectable even when the backend is absent, and
@@ -23,7 +24,7 @@ These are load-bearing; changing any of them changes the product.
 
 - **Exact tool/schema parity.** The proxy exposes the backend's tools/resources/prompts
   under their real names and schemas. Achieved by delegating to FastMCP's own
-  `FastMCPProxy` rather than re-declaring tools. Nothing to hand-sync. The server is
+  `ProxyProvider` rather than re-declaring tools. Nothing to hand-sync. The server is
   built with `dereference_schemas=False`: FastMCP otherwise inlines every `$ref` and drops
   `$defs` on listing, which keeps the accepted inputs but changes the schema's structure.
 - **Exactly one backend.** A backend config that does not define exactly one server is
@@ -33,9 +34,11 @@ These are load-bearing; changing any of them changes the product.
 - **Serialize by default.** `max_concurrent_calls` defaults to `1`. This is the whole
   reason the project exists; raising it is opt-in.
 - **Stay connectable, degrade.** The proxy must start and remain connectable regardless of
-  backend state. `initialize()` never raises when the backend is down (it returns the
-  last-good or a synthetic result), so clients can always complete their handshake with the
-  proxy. Discovery falls back to skipping a down backend rather than failing the listing.
+  backend state. It answers a client's `initialize` or `server/discover` itself, from what the
+  backend negotiated on its last successful connect, and never by calling the backend, so a
+  client can always complete its handshake with the proxy and the handshake adds nothing to
+  the backend's queue. Discovery falls back to skipping a down backend rather than failing the
+  listing.
 - **Network-silent break detection.** The proxy never runs timed pings against the backend.
   A broken connection is signalled by a delegated call failing with a connection-type error
   (plus the client's own `is_connected()` when available). Reconnection-after-reappear is
@@ -72,7 +75,8 @@ flowchart TD
     C["MCP client(s)<br/>(agents, tools)"] -->|"Streamable HTTP / stdio"| P
 
     subgraph proxy["mcp-call-orchestrator-proxy (one process)"]
-        P["FastMCPProxy<br/>server.py — exact schema parity<br/>+ exposure visibility (exposure.py)"]
+        P["FastMCP + ProxyProvider<br/>server.py — exact schema parity<br/>+ exposure visibility (exposure.py)"]
+        M["BackendMetadataMiddleware<br/>metadata.py — initialize / server/discover"]
         E["ExposureAuditBackend<br/>exposure_audit.py — filter-name audit"]
         Q["QueuedMCPBackend<br/>backend.py — queue-aware facade"]
         O["CallOrchestrator<br/>orchestrator.py — serializing queue"]
@@ -81,9 +85,11 @@ flowchart TD
         E --> Q
         Q -->|"submit(fn)"| O
         O -->|"runs fn"| R
+        P --- M
+        M -.->|"reads metadata (local)"| R
     end
 
-    R -->|"fresh fastmcp.Client per (re)connect"| B["backend MCP server"]
+    R -->|"fresh fastmcp.Client per (re)connect,<br/>protocol version negotiated"| B["backend MCP server"]
 
     A["app.py — create_proxy_app<br/>composition root + lifespan"] -.wires.-> proxy
     CFG["config.py — ProxySettings"] -.->|"settings"| A
@@ -94,32 +100,37 @@ Key seam: every layer speaks the `MCPBackendClient` **Protocol**
 ([`interfaces.py`](src/mcp_call_orchestrator_proxy/interfaces.py)). Because `ResilientBackend`,
 `QueuedMCPBackend`, `ExposureAuditBackend`, the real `fastmcp.Client`, and the test doubles all
 satisfy it structurally, they stack in any order with no adapters — which is what makes each layer
-independently testable.
+independently testable. Its `protocol_version` is `None` at each of the proxy's layers:
+`ProxyProvider` calls a 2026-07-28 backend's session directly, bypassing the Protocol's methods
+and with them the queue, so none of the layers reports that version. `NegotiatedBackendClient` extends
+the Protocol with what a connected client negotiated (capabilities, instructions); it is what `ResilientBackend` builds per connection.
 
 ## Module responsibilities
 
 | Module | Responsibility |
 |---|---|
-| [`cli.py`](src/mcp_call_orchestrator_proxy/cli.py) | Typer CLI (`run` subcommand). Maps flags to setting overrides, then runs the app over stdio or Streamable HTTP. CLI flags win over env vars. |
+| [`cli.py`](src/mcp_call_orchestrator_proxy/cli.py) | Typer CLI (`run` subcommand). Maps flags to setting overrides, configures logging, turns off FastMCP's update check, then runs the app over stdio or Streamable HTTP. CLI flags win over env vars. |
 | [`config.py`](src/mcp_call_orchestrator_proxy/config.py) | `ProxySettings` (pydantic-settings, `MCP_PROXY_` prefix). Validates that a backend source is configured. |
-| [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant and refuses FastMCP's transform keys, both at startup; forces `keep_alive=False` on a stdio transport; resolves a human-readable backend URL. |
-| [`interfaces.py`](src/mcp_call_orchestrator_proxy/interfaces.py) | `MCPBackendClient` Protocol — the structural contract every layer implements. |
-| [`resilient.py`](src/mcp_call_orchestrator_proxy/resilient.py) | `ResilientBackend` — owns the one live connection and a background supervisor that keeps it healthy across backend restarts. Sits *below* the orchestrator, so it never adds concurrency. Sources `backend_status`. |
+| [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant and refuses FastMCP's transform keys, both at startup; forces `keep_alive=False` on a stdio transport; gives a streamable-HTTP backend's client a read timeout longer than the call timeout; resolves a human-readable backend URL. |
+| [`interfaces.py`](src/mcp_call_orchestrator_proxy/interfaces.py) | `MCPBackendClient` Protocol — the structural contract every layer implements — and `NegotiatedBackendClient`, which adds what a connected client negotiated. |
+| [`resilient.py`](src/mcp_call_orchestrator_proxy/resilient.py) | `ResilientBackend` — owns the one live connection and a background supervisor that keeps it healthy across backend restarts. Sits *below* the orchestrator, so it never adds concurrency. Records what the backend negotiated (`BackendMetadata`) on each connect. Sources `backend_status`. |
 | [`orchestrator.py`](src/mcp_call_orchestrator_proxy/orchestrator.py) | `CallOrchestrator` — MCP-agnostic queue. A single dispatcher pulls FIFO and runs each call as its own task, gated by a semaphore; each call is independently timed out so one hang can't wedge the queue. |
 | [`backend.py`](src/mcp_call_orchestrator_proxy/backend.py) | `QueuedMCPBackend` — thin facade that routes every `MCPBackendClient` operation through `orchestrator.submit(...)`. Its `__aenter__/__aexit__` are no-ops (the real connection is opened once by the lifespan, not per call). |
 | [`exposure.py`](src/mcp_call_orchestrator_proxy/exposure.py) | Exposure control, policy side. `resolve_policies` turns the six allow/deny settings into one policy per surface (pure: no I/O, no logging) plus the startup warnings; `apply_exposure_policy` enforces it with FastMCP's scoped `disable`/`enable` visibility on the server. |
 | [`exposure_audit.py`](src/mcp_call_orchestrator_proxy/exposure_audit.py) | `ExposureAuditBackend` — exposure control, audit side. A pass-through `MCPBackendClient` layer above the queue that compares the configured filter names with the backend's first successful listing per surface and warns once per unknown name. Filters and refuses nothing. |
-| [`server.py`](src/mcp_call_orchestrator_proxy/server.py) | `build_proxy_server` — wraps the facade in `FastMCPProxy` directly (not `create_proxy()`) so the duck-typed facade is driven as-is with exact schemas, and turns off FastMCP's `$ref` inlining (`dereference_schemas=False`). |
+| [`server.py`](src/mcp_call_orchestrator_proxy/server.py) | `build_proxy_server` — a plain `FastMCP` server with FastMCP's `ProxyProvider` over the facade (not `FastMCPProxy`, not `create_proxy()`), so the duck-typed facade is driven as-is with exact schemas; installs `BackendMetadataMiddleware` and turns off FastMCP's `$ref` inlining (`dereference_schemas=False`). |
+| [`metadata.py`](src/mcp_call_orchestrator_proxy/metadata.py) | `BackendMetadataMiddleware` — the proxy's answer to `initialize` and `server/discover`: its own, plus the backend's `instructions`, with only the capabilities the backend has (tools always). Reads `ResilientBackend.metadata`; never calls the backend. |
 | [`app.py`](src/mcp_call_orchestrator_proxy/app.py) | Composition root. `create_proxy_app` wires settings → resilient → orchestrator → queued facade → exposure audit → proxy server, defines the lifespan, registers the proxy-native `backend_status` tool, applies the exposure policy and logs its startup warnings. |
 
 ## Request lifecycle (a tool call)
 
-1. A client calls a tool on the proxy over HTTP/stdio. `FastMCPProxy` (built with
-   `provider_error_strategy="warn"`) receives it.
+1. A client calls a tool on the proxy over HTTP/stdio, under either protocol version. The
+   `FastMCP` server receives it and looks the tool up in `ProxyProvider`'s cached listing.
 2. FastMCP's visibility filter refuses a tool that exposure control hides, as unknown. For a
-   visible tool, FastMCP opens `async with backend:` around the operation and calls
-   `call_tool_mcp` on `ExposureAuditBackend`, which passes it to the `QueuedMCPBackend`
-   facade. Both context managers are no-ops — the real connection is already open.
+   visible tool, `ProxyProvider` opens `async with backend:` around the operation and, since
+   the backend reports no 2026-07-28 version, calls `call_tool_mcp` on `ExposureAuditBackend`,
+   which passes it to the `QueuedMCPBackend` facade. Both context managers are no-ops — the
+   real connection is already open.
 3. The facade wraps the call in a zero-arg coroutine and hands it to
    `CallOrchestrator.submit(...)`. The caller awaits a future.
 4. The dispatcher pulls the call FIFO, acquires a concurrency slot (semaphore), and runs it
@@ -135,36 +146,55 @@ independently testable.
 `ResilientBackend` runs a background **supervisor** task (started by the lifespan via
 `async with resilient:`):
 
-- **Connect → hold → break → back off → retry, forever.** On connect it records the
-  init result and marks itself live. `_hold` keeps the connection until `_broken` or
-  `_shutdown` fires, re-checking a local `is_connected()` each `backend_health_poll_seconds`
+- **Connect → hold → break → back off → retry, forever.** Entering a fresh client negotiates
+  the protocol version (see [Protocol versions](#protocol-versions)); the supervisor then
+  records what the backend negotiated (`metadata`) and marks itself live. On a 2026-07-28
+  connection to a backend with tools it first lists them, once: a 2026-07-28 client sends a
+  tool's `x-mcp-header` arguments as `Mcp-Param-*` HTTP headers only for tools it has listed
+  itself, the backend rejects a call without them, and FastMCP's tool cache outlives the
+  reconnect, so nothing else would list them on the new connection. `_hold` keeps the
+  connection until `_broken` or `_shutdown` fires, re-checking a local `is_connected()` each `backend_health_poll_seconds`
   (no backend traffic).
 - **What counts as a break.** A delegated call that fails with a transport-level error
-  (`_CONNECTION_ERRORS`), or with one of two `McpError` signals the SDK itself uses to mean
-  "the session is gone, not just this call" (`_is_connection_broken_signal`), marks the
-  connection broken and rebuilds it:
-  - `CONNECTION_CLOSED` (code `-32000`) — the SDK's generic signal, synthesized by
-    `BaseSession`'s receive loop for every pending request once its read stream ends, for
-    *any* transport. This is what a stdio backend's dead subprocess produces (the pipe EOF is
-    swallowed inside the SDK's own receive loop, so it never reaches us as a raw `anyio`
-    error).
-  - The exact *session-terminated* signal (code `32600` / message `"Session terminated"`) —
-    the streamable-HTTP-specific clean HTTP 404 a backend returns for a now-unknown session
-    id after it restarts with its listener still up.
+  (`_CONNECTION_ERRORS`), or with an `MCPError` that means "the session is gone, not just this
+  call" (`_is_connection_broken_signal`), marks the connection broken and rebuilds it:
+  - `CONNECTION_CLOSED` (code `-32000`) — the SDK's generic signal, synthesized by its
+    JSON-RPC dispatcher for every pending request once its read stream ends, for *any*
+    transport. This is what a stdio backend's dead subprocess produces (the pipe EOF is
+    swallowed inside the SDK's receive loop, so it never reaches us as a raw `anyio` error).
+  - A lost streamable-HTTP session — the clean HTTP 404 a backend returns for a now-unknown
+    session id after it restarts with its listener still up. The SDK surfaces the JSON-RPC
+    error in the 404's body, which each server words its own way, or its own stand-in when
+    there is none, so the match is on the exact pairs: `-32600` "Session terminated" (the
+    SDK's stand-in), `-32600` "Session not found" (a Python MCP SDK server), `-32001`
+    "Session not found" (a TypeScript MCP SDK server). Only a backend on a protocol version up
+    to 2025-11-25 holds a session; a 2026-07-28 backend has none to lose, so its restart
+    reaches the proxy, if at all, as a transport error.
 
-  Both are broken-connection signals, not failed calls; an ordinary tool error
-  (`CallToolResult(isError=True)`) or any other `McpError` is a per-call failure and leaves
-  the connection live. The match is scoped to these exact codes precisely because an unknown
-  or failed tool call also raises `McpError`, and treating the whole class as a break would
-  tear the connection down on an ordinary error.
+  These are broken-connection signals, not failed calls; an ordinary tool error
+  (`CallToolResult(isError=True)`) or any other `MCPError` is a per-call failure and leaves
+  the connection live. The match is scoped to these exact signals precisely because an
+  unknown, failed or timed-out tool call also raises `MCPError` (a timeout with the same
+  `-32001` code), and treating the whole class as a break would tear the connection down on an
+  ordinary error.
+- **A timed-out call fails alone.** A call that outlasts `call_timeout_seconds` is cancelled
+  by the queue (the MCP request timeout, of the same length, is the backstop), and the MCP SDK
+  abandons that one request, aborting its HTTP request on a 2026-07-28 connection; the
+  connection stays live for the calls queued behind it. The backend's streamable-HTTP client
+  reads for `call_timeout_seconds` plus 5 s for this reason (`client.py::_http_client_factory`):
+  `fastmcp.Client` would otherwise set the HTTP read timeout to the call timeout as well, and
+  when that fires first on a 2026-07-28 connection, whose answers are not streamed, the MCP
+  SDK's transport fails as a whole and ends the connection. A timeout is a per-call failure,
+  not a break.
 - **Bounded, jittered backoff.** Delay grows from `reconnect_initial_backoff_seconds` by
   `reconnect_backoff_multiplier` up to `reconnect_max_backoff_seconds`, with ±20% jitter so
   retries don't lock-step. It never hammers a down endpoint.
 - **Fresh client per attempt.** Each (re)connect builds a new `fastmcp.Client` via the
   factory, sidestepping stale-session issues.
-- **`initialize()` never raises when down.** FastMCP forwards `initialize` on every client
-  connect; raising would stop agents from connecting to the *proxy* while the backend is
-  down. It returns the last-good result, or a synthetic one before the first connect.
+- **Negotiated metadata outlives the connection.** `metadata` (protocol version,
+  capabilities, instructions) is replaced on each connect and kept while the backend is
+  down, so the proxy's own handshake answers keep the backend's instructions and
+  capabilities through an outage. It is `None` only before the first connect.
 - **Prompt shutdown.** The backoff sleep is interruptible by the shutdown event, so
   `SIGTERM` mid-backoff tears down immediately instead of stalling systemd's stop timeout.
 - **Supervisor never dies.** Unexpected exceptions are logged and retried, never propagated
@@ -192,9 +222,22 @@ Two structural points, both load-bearing:
 - **Client attribution lives in `backend.py`, not `orchestrator.py`.** Naming the calling
   client means reading MCP's request context, and the orchestrator is deliberately MCP-ignorant
   (it queues bare async callables). So the MCP-aware facade resolves the name and hands the
-  queue an opaque `client=` string. The tag is a monotonic counter keyed on the session via a
-  `WeakKeyDictionary` — **not** anything derived from `id()`, which CPython reuses once a
-  disconnected client's session is collected, silently merging unrelated clients in the log.
+  queue an opaque `client=` string. A tag names the client as it identifies itself in
+  `clientInfo`:
+
+  | Caller | Tag |
+  |---|---|
+  | A client on a protocol version up to 2025-11-25 | `<name>-<nnn>`: one number per session, taken from `initialize` |
+  | A client on 2026-07-28 | `<name>`, from the request itself, with no number |
+  | A client that gives no name | `client` (numbered as above on a session) |
+  | The proxy's own call, with no client request behind it | `proxy` |
+
+  A 2026-07-28 client has no session, so two instances of one client cannot be told apart
+  and share a tag; nothing per request identifies an instance. A session's number is keyed
+  by the identity of its `initialize` params, the one object that lives exactly as long as
+  the session (the SDK builds a new session wrapper per request), and the entry is dropped
+  when that object is collected — so a collected session's `id()`, which CPython reuses, can
+  never hand its tag to another client.
 - **What counts as "absorbed" is injected, not hard-coded.** `CallOrchestrator` takes an
   `expected_errors` tuple, logged at `WARNING` without a traceback; `app.py` passes
   `BackendUnavailableError`. It also takes a `declined_errors` tuple, logged at `INFO` without a
@@ -204,6 +247,43 @@ Two structural points, both load-bearing:
   the backend's `ErrorData`, so FastMCP still serves an empty listing for it. The queue cannot
   know which failures its owner considers routine, and the composition root can — so the
   severity invariant above is enforced without the generic layer learning about backends.
+
+## Protocol versions
+
+MCP has two kinds of protocol version. Up to 2025-11-25 a connection opens with the
+`initialize` handshake, which starts a session (over streamable HTTP, a session id every later
+request carries). 2026-07-28 has no handshake and no session: a client may ask
+`server/discover` for the server's metadata, and every request carries its own protocol
+version, `clientInfo` and client capabilities in its `_meta`. FastMCP 4 on MCP SDK 2 speaks
+both.
+
+- **Clients.** The proxy serves both kinds on the same endpoint. Over streamable HTTP each
+  request is routed by its `MCP-Protocol-Version` header; over stdio the client's first
+  request fixes the connection's kind.
+- **Backend.** The proxy's own client negotiates the backend's version as the MCP SDK does
+  by default, with no setting to pin it: it asks `server/discover` at the newest version and
+  falls back to the `initialize` handshake for a server that does not answer it as a
+  2026-07-28 server. It negotiates again on every reconnect, so a backend that is upgraded
+  in place is met at its new version.
+- **Bridging.** The two sides are independent: any client version reaches a backend of
+  either kind, because the proxy relays requests and results, not the connection. A
+  server-initiated request from the backend (sampling, elicitation, roots) and a 2026-07-28
+  backend's input-required round are not relayed: `ProxyProvider` would take those on the
+  backend's session directly, outside the queue (see `protocol_version` above).
+- **Handshake.** `BackendMetadataMiddleware` answers `initialize` and `server/discover` with
+  the proxy's own server identity and protocol version, adding the backend's `instructions`
+  and leaving out each capability the backend did not advertise (prompts, resources,
+  logging, completions, tasks), and each `experimental` or `extensions` entry whose
+  identifier the backend does not have — clients would otherwise send requests the backend
+  answers with "Method not found". A kept capability keeps the proxy's own flags, which
+  describe what the proxy delivers. The tools capability stays: `backend_status` is always
+  served. The values come from
+  `ResilientBackend.metadata`; before the backend's first connect the proxy's own answer goes
+  out unchanged, with every capability the proxy has. The proxy routinely starts before its
+  backend, so clients often connect in that window, and a client keeps the capabilities it
+  was given for its whole session: an unneeded capability costs it at most an empty listing
+  (a backend's "Method not found" is logged at `INFO`), while a missing one would hide the
+  backend's prompts and resources from it for good.
 
 ## Configuration model
 
@@ -238,6 +318,12 @@ secrets unless a config explicitly re-declares them.
 `log_level` is validated to a `Literal` rather than parsed leniently: a silently-ignored
 `--log-level VERBOSE` would leave an operator hunting for `DEBUG` records that were never
 going to be emitted.
+
+The proxy opens no outbound connection except to its backend. FastMCP asks pypi.org for a
+newer release of itself when a server starts; `cli.py` turns that check off
+(`fastmcp.settings.check_for_updates = "off"`) at the process entry point, which owns
+library-wide settings as it owns the logging configuration. An operator who sets
+`FASTMCP_CHECK_FOR_UPDATES` keeps their own choice.
 
 ## Exposure control
 

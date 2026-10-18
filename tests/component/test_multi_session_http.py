@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 import pytest
 from fastmcp import Client
+from mcp import types as mcp_types
 
 from mcp_call_orchestrator_proxy.app import create_proxy_app
 from mcp_call_orchestrator_proxy.config import ProxySettings
@@ -87,9 +89,51 @@ def client_of(message: str) -> str:
     return message.split("client=")[1].split()[0]
 
 
+async def _two_agents_call_echo(
+    serve_over_http,
+    make_echo_backend,
+    *,
+    mode: str,
+    names: tuple[str, str],
+    calls_each: int,
+) -> None:
+    """Two clients, named as given, call ``echo`` concurrently over real HTTP."""
+    backend = make_echo_backend(delay=0.02)
+    proxy_app = create_proxy_app(
+        settings=ProxySettings(backend_api_key="a" * 32), backend_client=backend
+    )
+
+    async def run_one(url: str, name: str, tag: str) -> None:
+        info = mcp_types.Implementation(name=name, version="1")
+        async with Client(url, mode=mode, client_info=info) as client:
+            for i in range(calls_each):
+                await client.call_tool("echo", {"value": f"{tag}-{i}"})
+
+    async with serve_over_http(proxy_app.mcp) as url:
+        await asyncio.gather(
+            run_one(url, names[0], "one"),
+            run_one(url, names[1], "two"),
+        )
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "names", "expected_tag"),
+    [
+        # One session each: the same client name, told apart by its number.
+        ("legacy", ("agent", "agent"), r"agent-\d{3}"),
+        # No session: the name each request carries is all there is.
+        ("2026-07-28", ("agent-one", "agent-two"), r"agent-(one|two)"),
+    ],
+    ids=["session", "sessionless"],
+)
 async def test_the_default_log_shows_two_agents_being_interleaved_safely(
-    serve_over_http, make_echo_backend, caplog: pytest.LogCaptureFixture
+    serve_over_http,
+    make_echo_backend,
+    caplog: pytest.LogCaptureFixture,
+    mode: str,
+    names: tuple[str, str],
+    expected_tag: str,
 ) -> None:
     """The product's whole value proposition, read back off the default-level log.
 
@@ -100,23 +144,15 @@ async def test_the_default_log_shows_two_agents_being_interleaved_safely(
     rather than racing - which is the one thing this proxy exists to promise.
     """
     caplog.set_level(logging.INFO, logger="mcp_call_orchestrator_proxy")
-
-    fake_settings = ProxySettings(backend_api_key="a" * 32)
-    backend = make_echo_backend(delay=0.02)
-    proxy_app = create_proxy_app(settings=fake_settings, backend_client=backend)
-
     calls_each = 3
 
-    async def run_one(url: str, tag: str) -> None:
-        async with Client(url) as client:
-            for i in range(calls_each):
-                await client.call_tool("echo", {"value": f"{tag}-{i}"})
-
-    async with serve_over_http(proxy_app.mcp) as url:
-        await asyncio.gather(
-            run_one(url, "client-one"),
-            run_one(url, "client-two"),
-        )
+    await _two_agents_call_echo(
+        serve_over_http,
+        make_echo_backend,
+        mode=mode,
+        names=names,
+        calls_each=calls_each,
+    )
 
     ours = [
         r.getMessage() for r in caplog.records if "orchestrator: call" in r.getMessage()
@@ -135,6 +171,7 @@ async def test_the_default_log_shows_two_agents_being_interleaved_safely(
     # attributed to anyone. This is the assertion the whole test turns on.
     tags = {client_of(m) for m in tool_calls}
     assert len(tags) == 2, f"two agents were not told apart in the log: {tags}"
+    assert all(re.fullmatch(expected_tag, tag) for tag in tags), tags
     for tag in tags:
         assert sum(client_of(m) == tag for m in tool_calls) == calls_each
 
@@ -151,3 +188,28 @@ async def test_the_default_log_shows_two_agents_being_interleaved_safely(
         and r.name.startswith("mcp_call_orchestrator_proxy")
     ]
     assert not noisy, f"a healthy busy period tripped the warning filter: {noisy}"
+
+
+@pytest.mark.asyncio
+async def test_sessionless_instances_of_one_client_share_its_name_in_the_log(
+    serve_over_http, make_echo_backend, caplog: pytest.LogCaptureFixture
+) -> None:
+    """From 2026-07-28 there is no session to number, so two instances of one
+    client log under its bare name rather than under made-up distinct tags."""
+    caplog.set_level(logging.INFO, logger="mcp_call_orchestrator_proxy")
+
+    await _two_agents_call_echo(
+        serve_over_http,
+        make_echo_backend,
+        mode="2026-07-28",
+        names=("agent", "agent"),
+        calls_each=2,
+    )
+
+    tool_calls = [
+        r.getMessage()
+        for r in caplog.records
+        if "call accepted" in r.getMessage() and "op=call_tool:echo" in r.getMessage()
+    ]
+    assert len(tool_calls) == 4
+    assert {client_of(m) for m in tool_calls} == {"agent"}
