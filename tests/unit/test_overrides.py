@@ -9,12 +9,15 @@ them; only the description texts the file names may change.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
 import logging
+import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import pytest
 from fastmcp import Client, FastMCP
@@ -24,8 +27,16 @@ from pydantic import Field
 from mcp_call_orchestrator_proxy.app import create_proxy_app
 from mcp_call_orchestrator_proxy.config import ProxySettings
 from mcp_call_orchestrator_proxy.metadata import BackendMetadataMiddleware
-from mcp_call_orchestrator_proxy.overrides import TextOverride, load_overrides
-from mcp_call_orchestrator_proxy.resilient import BackendMetadata
+from mcp_call_orchestrator_proxy.overrides import (
+    Overrides,
+    TextOverride,
+    load_overrides,
+)
+from mcp_call_orchestrator_proxy.overrides_audit import OverridesAudit
+from mcp_call_orchestrator_proxy.resilient import (
+    BackendMetadata,
+    BackendUnavailableError,
+)
 
 
 def _backend() -> FastMCP:
@@ -116,7 +127,29 @@ def test_each_operation_gives_the_text_a_client_sees(
         ({"tools": {"t": {"name": "renamed"}}}, "name"),
         ({"servers": {}}, "servers"),
         ({"tools": {"backend_status": {"description": {"replace": "a"}}}}, "own tool"),
-        ("{not json", "not valid"),
+        ({"tools": {"t": {}}}, "- tools.t: sets nothing"),
+        ({"tools": {"t": {"arguments": {}}}}, "- tools.t: sets nothing"),
+        ({"prompts": {"p": {}}}, "- prompts.p: sets nothing"),
+        ({"resources": {"data://r": {}}}, "- resources.data://r: sets nothing"),
+        (
+            {"tools": {"t": {"description": {"append": ""}}}},
+            "- tools.t.description.append: adds no text",
+        ),
+        (
+            {"prompts": {"p": {"arguments": {"a": {"prepend": ""}}}}},
+            "- prompts.p.arguments.a.prepend: adds no text",
+        ),
+        ({"instructions": {"append": ""}}, "- instructions.append: adds no text"),
+        (
+            '{"tools": {"t": {"description": {"replace": "a"}, '
+            '"description": {"replace": "b"}}}}',
+            "- tools.t.description: given twice",
+        ),
+        (
+            '{"tools": {"t": {"description": {"replace": "a"}}}, "tools": {}}',
+            "- tools: given twice",
+        ),
+        ("{not json", "not valid JSON"),
     ],
 )
 def test_a_file_the_proxy_cannot_honour_stops_it_at_startup(
@@ -129,6 +162,29 @@ def test_a_file_the_proxy_cannot_honour_stops_it_at_startup(
 
     assert path in str(raised.value)
     assert reason in str(raised.value)
+
+
+def test_replace_with_empty_text_blanks_the_description() -> None:
+    assert TextOverride(replace="").apply("BACKEND") == ""
+
+
+def test_every_fault_in_the_file_is_named(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        {
+            "tools": {"t": {}, "u": {"description": {"append": ""}}},
+            "resources": {"data://r": {}},
+        },
+    )
+
+    with pytest.raises(ValueError) as raised:
+        load_overrides(path)
+
+    assert str(raised.value).splitlines()[1:] == [
+        "- tools.t: sets nothing; give 'description' or 'arguments'",
+        "- tools.u.description.append: adds no text; 'replace': '' blanks the text",
+        "- resources.data://r: sets nothing; give 'description'",
+    ]
 
 
 def test_a_missing_file_stops_the_proxy_at_startup(tmp_path: Path) -> None:
@@ -237,6 +293,30 @@ async def test_each_named_description_changes_and_nothing_else(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "override",
+    [{"replace": "Summarize briefly."}, {"append": "Formal."}, {"prepend": "Short."}],
+)
+async def test_a_prompts_listing_and_its_result_carry_the_same_description(
+    tmp_path: Path, override: dict[str, str]
+) -> None:
+    backend = _backend()
+    path = _write(tmp_path, {"prompts": {"summarize": {"description": override}}})
+    async with Client(backend) as direct:
+        own = await direct.get_prompt("summarize", {"style": "plain"})
+
+    async with Client(_proxy(path, backend).mcp) as client:
+        [listed] = await client.list_prompts()
+        result = await client.get_prompt("summarize", {"style": "plain"})
+
+    assert listed.description == result.description
+    assert result.description == TextOverride.model_validate(override).apply(
+        own.description
+    )
+    assert result.messages == own.messages
+
+
+@pytest.mark.asyncio
 async def test_a_lookup_sees_the_overridden_description(tmp_path: Path) -> None:
     path = _write(tmp_path, {"tools": {"search": {"description": {"replace": "New"}}}})
     proxy_app = _proxy(path, _backend())
@@ -267,49 +347,157 @@ async def test_the_cached_schema_stays_the_backends_own(tmp_path: Path) -> None:
     )
 
 
+UNKNOWN_NAMES = {
+    "tools": {
+        "search": {"arguments": {"query": {"append": "x"}, "page": {"append": "x"}}},
+        "missing_tool": {"description": {"replace": "x"}},
+    },
+    "prompts": {"missing_prompt": {"description": {"replace": "x"}}},
+    "resources": {
+        "data://readme": {"description": {"append": "x"}},
+        "data://item/{name}": {"description": {"append": "x"}},
+        "data://missing": {"description": {"append": "x"}},
+    },
+}
+
+UNKNOWN_NAME_WARNINGS = [
+    "overrides: prompt 'missing_prompt' not found on backend",
+    "overrides: resource 'data://missing' not found on backend",
+    "overrides: tool 'missing_tool' not found on backend",
+    "overrides: tool 'search' has no argument 'page' on backend",
+]
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return sorted(
+        r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+    )
+
+
+def _queued(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str]]:
+    accepted = (_ACCEPTED.search(r.getMessage()) for r in caplog.records)
+    return [(m.group(1), m.group(2)) for m in accepted if m]
+
+
+_ACCEPTED = re.compile(r"call accepted client=(\S+) op=(\S+)")
+
+
+async def _until(condition: Callable[[], bool]) -> None:
+    for _ in range(500):
+        if condition():
+            return
+        await asyncio.sleep(0.01)
+    pytest.fail("condition not met within 5 s")
+
+
 @pytest.mark.asyncio
-async def test_names_the_backend_does_not_have_are_reported_once(
+async def test_names_the_backend_does_not_have_are_reported_when_it_connects(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    path = _write(
-        tmp_path,
-        {
-            "tools": {
-                "search": {
-                    "arguments": {"query": {"append": "x"}, "page": {"append": "x"}}
-                },
-                "missing_tool": {"description": {"replace": "x"}},
-            },
-            "prompts": {"missing_prompt": {"description": {"replace": "x"}}},
-            "resources": {
-                "data://readme": {"description": {"append": "x"}},
-                "data://item/{name}": {"description": {"append": "x"}},
-                "data://missing": {"description": {"append": "x"}},
-            },
-        },
-    )
-    caplog.set_level(logging.WARNING, logger="mcp_call_orchestrator_proxy")
+    """No client has to list anything: the proxy lists every surface itself."""
+    path = _write(tmp_path, UNKNOWN_NAMES)
+    caplog.set_level(logging.INFO, logger="mcp_call_orchestrator_proxy")
 
     async with Client(_proxy(path, _backend()).mcp) as client:
+        await _until(lambda: len(_warnings(caplog)) == len(UNKNOWN_NAME_WARNINGS))
+        assert _queued(caplog) == [
+            ("proxy", "list_tools"),
+            ("proxy", "list_prompts"),
+            ("proxy", "list_resources"),
+            ("proxy", "list_resource_templates"),
+        ]
+        # A client's listings report nothing more.
         await client.list_tools()
         await client.list_prompts()
         await client.list_resources()
-        # Only once both resource listings are in: a name may be a template's.
-        assert not any("data://" in r.getMessage() for r in caplog.records)
         await client.list_resource_templates()
-        for _ in range(2):
-            await client.list_tools()
-            await client.list_prompts()
-            await client.list_resources()
-            await client.list_resource_templates()
 
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert sorted(warnings) == [
-        "overrides: prompt 'missing_prompt' not found on backend",
-        "overrides: resource 'data://missing' not found on backend",
-        "overrides: tool 'missing_tool' not found on backend",
-        "overrides: tool 'search' has no argument 'page' on backend",
+    assert _warnings(caplog) == UNKNOWN_NAME_WARNINGS
+
+
+class _ListingBackend:
+    """Lists one tool; fails its first ``failures`` tool listings as a lost backend."""
+
+    def __init__(self, failures: int = 0) -> None:
+        self.failures = failures
+        self.listed: list[str] = []
+
+    async def list_tools(self) -> list[mcp_types.Tool]:
+        self.listed.append("tools")
+        if self.failures:
+            self.failures -= 1
+            raise BackendUnavailableError("backend unavailable")
+        return [mcp_types.Tool(name="search", input_schema={"type": "object"})]
+
+    async def list_prompts(self) -> list[mcp_types.Prompt]:
+        self.listed.append("prompts")
+        return []
+
+    async def list_resources(self) -> list[mcp_types.Resource]:
+        self.listed.append("resources")
+        return []
+
+    async def list_resource_templates(self) -> list[mcp_types.ResourceTemplate]:
+        self.listed.append("templates")
+        return []
+
+
+def _audit(backend: _ListingBackend, capabilities: Any = None) -> OverridesAudit:
+    overrides = Overrides.model_validate(
+        {
+            "tools": {"gone": {"description": {"replace": "x"}}},
+            "prompts": {"brief": {"description": {"replace": "x"}}},
+        }
+    )
+    return OverridesAudit(overrides, cast(Any, backend), lambda: capabilities)
+
+
+@pytest.mark.asyncio
+async def test_a_completed_check_is_not_repeated(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend = _ListingBackend()
+    audit = _audit(backend)
+    caplog.set_level(logging.WARNING, logger="mcp_call_orchestrator_proxy")
+
+    await audit.check()
+    await audit.check()
+
+    assert backend.listed == ["tools", "prompts", "resources", "templates"]
+    assert _warnings(caplog) == [
+        "overrides: prompt 'brief' not found on backend",
+        "overrides: tool 'gone' not found on backend",
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_check_the_backend_interrupts_runs_again_on_the_next_connect(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend = _ListingBackend(failures=1)
+    audit = _audit(backend)
+    caplog.set_level(logging.INFO, logger="mcp_call_orchestrator_proxy")
+
+    await audit.check()
+    assert _warnings(caplog) == []
+    assert "runs again when the backend next connects" in caplog.text
+
+    await audit.check()
+    assert len(_warnings(caplog)) == 2
+
+
+@pytest.mark.asyncio
+async def test_only_the_surfaces_the_backend_advertises_are_listed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend = _ListingBackend()
+    tools_only = mcp_types.ServerCapabilities(tools=mcp_types.ToolsCapability())
+    caplog.set_level(logging.WARNING, logger="mcp_call_orchestrator_proxy")
+
+    await _audit(backend, tools_only).check()
+
+    assert backend.listed == ["tools"]
+    assert "overrides: prompt 'brief' not found on backend" in _warnings(caplog)
 
 
 @pytest.mark.asyncio

@@ -6,21 +6,21 @@ hands on copies whose description texts the overrides file changes. Names,
 schemas and everything else pass through as the backend has them; within a
 tool's input schema only an argument's ``description`` changes.
 
-On the first successful listing of each surface it reports, once per process,
-each name in the file the backend does not have, at ``WARNING``: only the
-operator can correct the file. Resources are checked against the union of
-resource URIs and template ``uriTemplate``s, once both listings have succeeded.
-It adds no backend call of its own.
+A ``prompts/get`` result carries the prompt's description too;
+``PromptResultDescriptions`` applies the prompt's override to it, so a client
+reads the same text in the listing and in the result. Neither adds a backend
+call of its own.
 """
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
-from fastmcp.prompts import Prompt
+from fastmcp.prompts import Prompt, PromptResult
+from fastmcp.prompts.base import InputRequiredPromptResult
 from fastmcp.resources import Resource, ResourceTemplate
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.transforms import (
     GetPromptNext,
     GetResourceNext,
@@ -30,25 +30,18 @@ from fastmcp.server.transforms import (
 )
 from fastmcp.tools import Tool
 from fastmcp.utilities.versions import VersionSpec
+from mcp import types as mcp_types
 
 from mcp_call_orchestrator_proxy.overrides import Overrides, TextOverride
 
-logger = logging.getLogger(__name__)
-
 
 class DescriptionOverrides(Transform):
-    """Changes description texts as the overrides file says, and audits its names."""
+    """Changes description texts as the overrides file says."""
 
     def __init__(self, overrides: Overrides) -> None:
         self._overrides = overrides
-        self._reported: set[str] = set()
-        # None = that listing has not succeeded yet (the resource check waits for both).
-        self._resource_uris: set[str] | None = None
-        self._template_uris: set[str] | None = None
 
     async def list_tools(self, tools: Sequence[Tool]) -> Sequence[Tool]:
-        listed = {tool.name: _argument_names(tool.parameters) for tool in tools}
-        self._audit_items("tool", self._overrides.tools, listed)
         return [self._tool(tool) for tool in tools]
 
     async def get_tool(
@@ -58,8 +51,6 @@ class DescriptionOverrides(Transform):
         return None if tool is None else self._tool(tool)
 
     async def list_resources(self, resources: Sequence[Resource]) -> Sequence[Resource]:
-        self._resource_uris = {str(resource.uri) for resource in resources}
-        self._audit_resources()
         return [self._resource(resource, str(resource.uri)) for resource in resources]
 
     async def get_resource(
@@ -75,8 +66,6 @@ class DescriptionOverrides(Transform):
     async def list_resource_templates(
         self, templates: Sequence[ResourceTemplate]
     ) -> Sequence[ResourceTemplate]:
-        self._template_uris = {template.uri_template for template in templates}
-        self._audit_resources()
         return [
             self._resource(template, template.uri_template) for template in templates
         ]
@@ -94,11 +83,6 @@ class DescriptionOverrides(Transform):
         return self._resource(template, template.uri_template)
 
     async def list_prompts(self, prompts: Sequence[Prompt]) -> Sequence[Prompt]:
-        listed = {
-            prompt.name: {argument.name for argument in prompt.arguments or ()}
-            for prompt in prompts
-        }
-        self._audit_items("prompt", self._overrides.prompts, listed)
         return [self._prompt(prompt) for prompt in prompts]
 
     async def get_prompt(
@@ -149,37 +133,28 @@ class DescriptionOverrides(Transform):
         description = override.description.apply(item.description)
         return item.model_copy(update={"description": description})
 
-    def _audit_items(
+
+class PromptResultDescriptions(Middleware):
+    """Applies a prompt's description override to its ``prompts/get`` result."""
+
+    def __init__(self, overrides: Overrides) -> None:
+        self._overrides = overrides
+
+    async def on_get_prompt(
         self,
-        kind: str,
-        overrides: Mapping[str, Any],
-        listed: Mapping[str, set[str]],
-    ) -> None:
-        for name in sorted(overrides):
-            if name not in listed:
-                self._report(f"{kind} {name!r} not found on backend")
-                continue
-            arguments: Iterable[str] = overrides[name].arguments
-            for argument in sorted(set(arguments) - listed[name]):
-                self._report(f"{kind} {name!r} has no argument {argument!r} on backend")
-
-    def _audit_resources(self) -> None:
-        if self._resource_uris is None or self._template_uris is None:
-            return
-        listed = self._resource_uris | self._template_uris
-        for name in sorted(set(self._overrides.resources) - listed):
-            self._report(f"resource {name!r} not found on backend")
-
-    def _report(self, finding: str) -> None:
-        if finding in self._reported:
-            return
-        self._reported.add(finding)
-        logger.warning("overrides: %s", finding)
-
-
-def _argument_names(schema: Mapping[str, Any]) -> set[str]:
-    properties = schema.get("properties")
-    return set(properties) if isinstance(properties, Mapping) else set()
+        context: MiddlewareContext[mcp_types.GetPromptRequestParams],
+        call_next: CallNext[mcp_types.GetPromptRequestParams, PromptResult],
+    ) -> PromptResult:
+        result = await call_next(context)
+        override = self._overrides.prompts.get(context.message.name)
+        if (
+            override is None
+            or override.description is None
+            or isinstance(result, InputRequiredPromptResult)
+        ):
+            return result
+        description = override.description.apply(result.description)
+        return result.model_copy(update={"description": description})
 
 
 def _with_argument_descriptions(

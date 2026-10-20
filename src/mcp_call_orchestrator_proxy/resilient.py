@@ -37,7 +37,7 @@ import contextlib
 import datetime
 import logging
 import random
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
@@ -195,12 +195,25 @@ class ResilientBackend:
         self._broken = asyncio.Event()
         self._first_attempt_done = asyncio.Event()
         self._supervisor_task: asyncio.Task[None] | None = None
+        self._connect_listeners: list[Callable[[], Coroutine[Any, Any, None]]] = []
+        self._listener_tasks: set[asyncio.Task[None]] = set()
 
         # Status bookkeeping (surfaced by the backend_status tool).
         self._connected_since: datetime.datetime | None = None
         self._last_error: str | None = None
         self._consecutive_failures = 0
         self._current_backoff = 0.0
+
+    def add_connect_listener(
+        self, listener: Callable[[], Coroutine[Any, Any, None]]
+    ) -> None:
+        """Run ``listener`` as a task each time a connection becomes live.
+
+        The task runs beside the held connection, so it may call the backend,
+        through the proxy's queue or directly; it is cancelled on shutdown. Its
+        calls carry no client request, so the queue logs them as the proxy's.
+        """
+        self._connect_listeners.append(listener)
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -242,6 +255,9 @@ class ResilientBackend:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
             self._supervisor_task = None
+        for listener_task in list(self._listener_tasks):
+            listener_task.cancel()
+        await asyncio.gather(*self._listener_tasks, return_exceptions=True)
         self._live = None
 
     # -- supervisor ----------------------------------------------------------
@@ -287,6 +303,12 @@ class ResilientBackend:
                             self._backend_url,
                             client.protocol_version,
                         )
+                    for listener in self._connect_listeners:
+                        task = asyncio.create_task(
+                            listener(), name="backend-connect-listener"
+                        )
+                        self._listener_tasks.add(task)
+                        task.add_done_callback(self._listener_tasks.discard)
                     self._first_attempt_done.set()
                     await self._hold(client)
             except _CONNECTION_ERRORS as exc:

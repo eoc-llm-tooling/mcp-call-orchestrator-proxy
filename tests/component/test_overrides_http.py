@@ -9,8 +9,11 @@ operator's, and its calls must still reach the backend unchanged.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -96,3 +99,77 @@ async def test_a_client_sees_the_operators_texts(
         )
         if name not in OVERRIDES["tools"]:
             assert tools[name].description == tool.description
+
+
+async def _until(condition: Any, timeout: float = 15.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return
+        await asyncio.sleep(0.05)
+    pytest.fail(f"condition not met within {timeout} s")
+
+
+@pytest.mark.asyncio
+async def test_unknown_names_are_reported_once_across_reconnects(
+    spawn_backend,
+    backend_config_file,
+    serve_over_http,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The check runs on the first connect, as the proxy's own listings, and a
+    backend that restarts is not checked again."""
+    backend = spawn_backend()
+    overrides = tmp_path / "overrides.json"
+    overrides.write_text(
+        json.dumps({"tools": {"absent": {"description": {"replace": "x"}}}})
+    )
+    proxy_app = create_proxy_app(
+        settings=ProxySettings(
+            backend_config=backend_config_file(backend.url),
+            overrides=str(overrides),
+            reconnect_initial_backoff_seconds=0.05,
+            reconnect_max_backoff_seconds=0.2,
+            backend_health_poll_seconds=0.05,
+        )
+    )
+    caplog.set_level(logging.INFO, logger="mcp_call_orchestrator_proxy")
+
+    def warned() -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage() == "overrides: tool 'absent' not found on backend"
+        ]
+
+    async with serve_over_http(proxy_app.mcp) as url, Client(url) as client:
+        await _until(lambda: len(warned()) == 1)
+        proxy_listings = [
+            r.getMessage()
+            for r in caplog.records
+            if "call accepted client=proxy op=list_" in r.getMessage()
+        ]
+        assert len(proxy_listings) == 4
+
+        backend.kill()
+        # Break detection makes no traffic of its own: a failed call reveals it.
+        with pytest.raises(Exception):  # noqa: B017 - any error, as long as it is one
+            await client.call_tool("echo", {"value": "x"})
+        await _until(
+            lambda: not proxy_app.backend_client.status_snapshot()["connected"]
+        )
+        backend.start()
+        await _until(lambda: proxy_app.backend_client.status_snapshot()["connected"])
+        # Time for a second check to show, had one been started.
+        await asyncio.sleep(0.5)
+
+    assert any("backend reconnected" in r.getMessage() for r in caplog.records)
+    assert len(warned()) == 1
+    assert (
+        sum(
+            "call accepted client=proxy op=list_" in r.getMessage()
+            for r in caplog.records
+        )
+        == 4
+    )

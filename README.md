@@ -238,15 +238,18 @@ Rules:
 - **Instructions** apply once the backend has connected: until the proxy has
   seen the backend's own instructions, clients get none, as without a file.
 - **A file the proxy cannot apply stops it at startup** with an error naming
-  the file: one that cannot be read or parsed, an unknown key, an empty
-  operation or `replace` combined with another, or an entry for
+  the file and the path of each fault: one that cannot be read or parsed, a
+  key given twice in one object, an unknown key, an entry or operation that
+  sets nothing, `replace` combined with another operation, a `prepend` or
+  `append` with empty text (`"replace": ""` blanks a text), or an entry for
   `backend_status`, which is the proxy's own tool.
-- **Unknown names** — after the first successful listing, each tool, prompt,
-  resource or argument the backend does not have is reported once as a
-  `WARNING`. At startup an `INFO` record names the file, its SHA-256 and what it
-  overrides.
-- Results are relayed as the backend sends them: the description in a
-  `prompts/get` result is the backend's own.
+- **Unknown names** — when the backend first connects, the proxy lists
+  everything the backend serves, as its own calls (logged as `proxy`), and
+  reports each tool, prompt, resource or argument in the file that the backend
+  does not have, once, as a `WARNING`. At startup an `INFO` record names the
+  file, its SHA-256 and what it overrides.
+- **Prompt results** carry the same description as the prompt's listing; the
+  rest of every result is relayed as the backend sends it.
 
 ## Usage
 

@@ -9,8 +9,9 @@ proxy last served (`ListedToolSchemas`). A tool call, resource read or prompt
 request looks its item up in the backend listing `ProxyProvider` last served for
 that surface, however old; only a lookup made before any listing of its surface
 lists the backend. The operator's description overrides apply to the backend's
-items as a transform on the provider (`DescriptionOverrides`) and to its
-instructions in the handshake answer.
+items as a transform on the provider (`DescriptionOverrides`), to a prompt's
+`prompts/get` result (`PromptResultDescriptions`) and to the instructions in the
+handshake answer.
 """
 
 from __future__ import annotations
@@ -21,9 +22,13 @@ from contextlib import AbstractAsyncContextManager
 from typing import Any, cast
 
 from fastmcp import Client, FastMCP
+from fastmcp.server.middleware import Middleware
 from fastmcp.server.providers.proxy import ProxyProvider
 
-from mcp_call_orchestrator_proxy.descriptions import DescriptionOverrides
+from mcp_call_orchestrator_proxy.descriptions import (
+    DescriptionOverrides,
+    PromptResultDescriptions,
+)
 from mcp_call_orchestrator_proxy.interfaces import MCPBackendClient
 from mcp_call_orchestrator_proxy.metadata import BackendMetadataMiddleware
 from mcp_call_orchestrator_proxy.overrides import Overrides
@@ -55,10 +60,16 @@ def build_proxy_server(
     """
     listed = ListedToolSchemas()
     instructions = overrides.instructions if overrides else None
+    middleware: list[Middleware] = [
+        BackendMetadataMiddleware(metadata, instructions),
+        listed,
+    ]
+    if overrides is not None:
+        middleware.append(PromptResultDescriptions(overrides))
     server = FastMCP(
         name=server_name,
         lifespan=lifespan,
-        middleware=[BackendMetadataMiddleware(metadata, instructions), listed],
+        middleware=middleware,
         # FastMCP inlines `$ref`/`$defs` by default; schemas pass through as the
         # backend wrote them, so their structure stays the backend's own.
         dereference_schemas=False,
