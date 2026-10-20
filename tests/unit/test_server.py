@@ -10,10 +10,12 @@ backend's own.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import pytest
-from fastmcp import Client
+from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
 from mcp import types as mcp_types
 
 from mcp_call_orchestrator_proxy.app import create_proxy_app
@@ -36,6 +38,7 @@ class FakeBackend:
 
     def __init__(self) -> None:
         self.received_arguments: dict[str, Any] | None = None
+        self.tool_name = "vault_read"
 
     async def __aenter__(self) -> FakeBackend:
         return self
@@ -58,7 +61,7 @@ class FakeBackend:
     async def list_tools(self) -> list[mcp_types.Tool]:
         return [
             mcp_types.Tool(
-                name="vault_read",
+                name=self.tool_name,
                 description="Read a vault file's content and metadata.",
                 input_schema=VAULT_READ_SCHEMA,
             )
@@ -192,3 +195,31 @@ async def test_the_header_check_has_no_schema_for_a_hidden_tool() -> None:
 
     assert lookup("vault_read") is None
     assert lookup("backend_status") is not None
+
+
+@pytest.mark.asyncio
+async def test_a_tool_is_looked_up_in_the_listing_last_served(
+    fake_settings: ProxySettings,
+    age_cached_listings: Callable[[FastMCP, float], None],
+) -> None:
+    """A lookup resolves from the backend's tools as a client was last served
+    them, however long ago, and follows the next listing a client is served."""
+    fake_backend = FakeBackend()
+    proxy_app = create_proxy_app(settings=fake_settings, backend_client=fake_backend)
+
+    async with Client(proxy_app.mcp) as client:
+        await client.list_tools()
+        fake_backend.tool_name = "vault_read_v2"
+        age_cached_listings(proxy_app.mcp, 301.0)
+
+        result = await client.call_tool("vault_read", {"path": "a.md"})
+        assert not result.is_error
+        with pytest.raises(ToolError, match="Unknown tool"):
+            await client.call_tool("vault_read_v2", {"path": "a.md"})
+
+        assert "vault_read_v2" in {t.name for t in await client.list_tools()}
+        result = await client.call_tool("vault_read_v2", {"path": "b.md"})
+        assert not result.is_error
+        assert fake_backend.received_arguments == {"path": "b.md"}
+        with pytest.raises(ToolError, match="Unknown tool"):
+            await client.call_tool("vault_read", {"path": "a.md"})

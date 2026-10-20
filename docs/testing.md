@@ -96,6 +96,7 @@ Exposed as fixtures so any tier can use them without cross-directory imports.
 | `stdio_backend_config_file` | Factory writing an `mcpServers` JSON with a `command`/`args`/`env` entry for the stdio probe backend; returns its path. |
 | `make_echo_backend` | `EchoBackend` — one `echo` tool, verbatim, optional delay. |
 | `wrap_observer` | `ConcurrencyObserver` — wraps a backend client, records peak in-flight calls. |
+| `age_cached_listings` | Function `(server, seconds)` moving the timestamps of the server's `ProxyProvider` listing caches back, in place of that much time passing with no listing. |
 
 Probe server: declares server instructions (`INSTRUCTIONS`), to check they reach the proxy's
 clients. Tools: `echo`, `slow_echo` (delay, to widen the overlap window), `hang` (never
@@ -105,8 +106,10 @@ whose argument is declared for an `Mcp-Param-*` HTTP header, so a 2026-07-28 bac
 call without the header), `mismatched_output` (structured content its declared output schema
 rejects, as from a backend with a schema bug), `crash` (`os._exit(1)`,
 models a stdio backend dying), `env_var` (echoes back one entry of this process's own
-environment, for the env-isolation claim). Extend it when a scenario needs backend behaviour
-that only a controlled server can produce.
+environment, for the env-isolation claim). Besides tools it serves one resource
+(`probe://static`), one resource template (`probe://item/{name}`) and one prompt (`greet`), so
+resource reads and prompt requests have real items to look up. Extend it when a scenario needs
+backend behaviour that only a controlled server can produce.
 
 ## Conventions
 

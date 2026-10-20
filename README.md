@@ -247,7 +247,10 @@ in the same guide.
 only the operator can fix: a misconfigured exposure filter, a call the backend never answered;
 `INFO` adds a record per call as it's queued and as it completes; `DEBUG` adds internal
 detail for fault-finding. A 2026-07-28 client's `Mcp-Param-*` headers are checked against the
-tool list the proxy last served, so that check adds neither a record nor a backend call.
+tool list the proxy last served, so that check adds neither a record nor a backend call. A tool
+call, resource read or prompt request is looked up in what the proxy last listed to its
+clients, however long ago, so it adds only its own records; only a request made before any
+client has listed that kind of item since the proxy started also lists the backend.
 
 Each per-call record names the client by the name it gives itself (`clientInfo`):
 `<name>-<nnn>` for a client on a session-based protocol version, one number per

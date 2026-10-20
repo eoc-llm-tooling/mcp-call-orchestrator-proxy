@@ -43,6 +43,7 @@ from typing import IO, Any
 
 import pytest
 from fastmcp import FastMCP
+from fastmcp.server.providers.proxy import ProxyProvider
 from mcp import types as mcp_types
 
 from mcp_call_orchestrator_proxy.interfaces import NegotiatedBackendClient
@@ -463,3 +464,27 @@ def wrap_observer() -> type[ConcurrencyObserver]:
 def make_echo_backend() -> type[EchoBackend]:
     """Return the ``EchoBackend`` class for building a mock backend."""
     return EchoBackend
+
+
+def _age_proxy_listings(server: FastMCP, seconds: float) -> None:
+    """Make every listing the server's ``ProxyProvider`` holds ``seconds`` older.
+
+    Stands in for that much time passing with no listing, without waiting for it.
+    """
+    providers = [p for p in server.providers if isinstance(p, ProxyProvider)]
+    assert providers, "the server has no ProxyProvider"
+    for provider in providers:
+        for cache in (
+            provider._tools_cache,
+            provider._resources_cache,
+            provider._templates_cache,
+            provider._prompts_cache,
+        ):
+            if cache is not None:
+                cache.timestamp -= seconds
+
+
+@pytest.fixture
+def age_cached_listings() -> Callable[[FastMCP, float], None]:
+    """Return a function that ages a proxy server's cached backend listings."""
+    return _age_proxy_listings

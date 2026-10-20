@@ -28,12 +28,13 @@ import httpx2
 import pytest
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
+from mcp.types import TextContent, TextResourceContents
 
 from mcp_call_orchestrator_proxy.app import create_proxy_app
 from mcp_call_orchestrator_proxy.config import ProxySettings
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "support"))
-from probe_backend_server import INSTRUCTIONS
+from probe_backend_server import INSTRUCTIONS, STATIC_RESOURCE_URI
 
 pytestmark = pytest.mark.component
 
@@ -44,6 +45,9 @@ SESSIONLESS = "2026-07-28"
 # Client mode -> the version the client ends up speaking with the proxy. "auto"
 # asks the proxy with `server/discover`; a pinned version would not ask at all.
 CLIENT_MODES = {"legacy": HANDSHAKE, "auto": SESSIONLESS}
+
+# Past FastMCP's default cache lifetime for a provider's listings (300 s).
+LISTING_AGE_SECONDS = 301.0
 
 BACKEND_KINDS = pytest.mark.parametrize(
     "backend_legacy", [True, False], ids=["backend-2025", "backend-2026"]
@@ -97,8 +101,10 @@ async def test_each_pairing_completes_discovery_and_a_tool_call(
 
         tools = {tool.name for tool in await client.list_tools()}
         assert {"echo", "slow_echo", "backend_status"} <= tools
-        assert await client.list_prompts() == []
-        assert await client.list_resources() == []
+        assert [p.name for p in await client.list_prompts()] == ["greet"]
+        assert [str(r.uri) for r in await client.list_resources()] == [
+            STATIC_RESOURCE_URI
+        ]
 
         result = await client.call_tool("echo", {"value": "through the proxy"})
         assert result.content[0].text == "through the proxy"
@@ -178,6 +184,102 @@ async def test_a_tool_call_puts_only_itself_on_the_backend_queue(
         # Control: a listing the client does request is counted.
         await client.list_tools()
         assert _queued_ops(caplog)[-1] == "list_tools"
+
+
+@pytest.mark.asyncio
+@BACKEND_KINDS
+@pytest.mark.parametrize(
+    "client_mode", list(CLIENT_MODES), ids=["client-2025", "client-2026"]
+)
+async def test_a_tool_call_puts_only_itself_on_the_queue_however_old_the_listing(
+    spawn_backend,
+    backend_config_file,
+    serve_over_http,
+    age_cached_listings,
+    caplog: pytest.LogCaptureFixture,
+    client_mode: str,
+    backend_legacy: bool,
+) -> None:
+    """The tool is looked up in the listing last served to a client, however long
+    ago; no listing the client did not request reaches the queue under its name."""
+    backend = spawn_backend(legacy=backend_legacy)
+    proxy_app = create_proxy_app(
+        settings=ProxySettings(backend_config=backend_config_file(backend.url))
+    )
+    caplog.set_level(logging.INFO, logger="mcp_call_orchestrator_proxy")
+
+    async with (
+        serve_over_http(proxy_app.mcp) as url,
+        Client(url, mode=client_mode) as client,
+    ):
+        await client.list_tools()
+        age_cached_listings(proxy_app.mcp, LISTING_AGE_SECONDS)
+        caplog.clear()
+        echoed = await client.call_tool("echo", {"value": "late"})
+        assert echoed.content[0].text == "late"
+
+        assert _queued_ops(caplog) == ["call_tool:echo"]
+        # Control: a listing the client does request is counted.
+        await client.list_tools()
+        assert _queued_ops(caplog)[-1] == "list_tools"
+
+
+@pytest.mark.asyncio
+@BACKEND_KINDS
+@pytest.mark.parametrize(
+    "client_mode", list(CLIENT_MODES), ids=["client-2025", "client-2026"]
+)
+async def test_a_read_or_prompt_puts_only_itself_on_the_queue_however_old_the_listing(
+    spawn_backend,
+    backend_config_file,
+    serve_over_http,
+    age_cached_listings,
+    caplog: pytest.LogCaptureFixture,
+    client_mode: str,
+    backend_legacy: bool,
+) -> None:
+    """Resources, resource templates and prompts are looked up the way tools are."""
+    backend = spawn_backend(legacy=backend_legacy)
+    proxy_app = create_proxy_app(
+        settings=ProxySettings(backend_config=backend_config_file(backend.url))
+    )
+    caplog.set_level(logging.INFO, logger="mcp_call_orchestrator_proxy")
+
+    async with (
+        serve_over_http(proxy_app.mcp) as url,
+        Client(url, mode=client_mode) as client,
+    ):
+        await client.list_resources()
+        await client.list_resource_templates()
+        await client.list_prompts()
+
+        async def read(uri: str) -> str:
+            contents = await client.read_resource(uri)
+            assert isinstance(contents[0], TextResourceContents)
+            return contents[0].text
+
+        async def greet(name: str) -> str:
+            prompt = await client.get_prompt("greet", {"name": name})
+            assert isinstance(prompt.messages[0].content, TextContent)
+            return prompt.messages[0].content.text
+
+        lookups = {
+            "resource": (lambda: read(STATIC_RESOURCE_URI), "static"),
+            "template": (lambda: read("probe://item/abc"), "abc"),
+            "prompt": (lambda: greet("late"), "Hello, late."),
+        }
+        queued: dict[str, list[str]] = {}
+        for kind, (request, expected) in lookups.items():
+            age_cached_listings(proxy_app.mcp, LISTING_AGE_SECONDS)
+            caplog.clear()
+            assert await request() == expected
+            queued[kind] = _queued_ops(caplog)
+
+        assert queued == {
+            "resource": ["read_resource"],
+            "template": ["read_resource"],
+            "prompt": ["get_prompt:greet"],
+        }
 
 
 def _rewriting_header(name: str, value: str) -> Any:
