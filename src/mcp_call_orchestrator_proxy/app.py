@@ -31,6 +31,7 @@ from mcp_call_orchestrator_proxy.exposure import (
 from mcp_call_orchestrator_proxy.exposure_audit import ExposureAuditBackend
 from mcp_call_orchestrator_proxy.interfaces import NegotiatedBackendClient
 from mcp_call_orchestrator_proxy.orchestrator import CallOrchestrator
+from mcp_call_orchestrator_proxy.overrides import Overrides, load_overrides
 from mcp_call_orchestrator_proxy.resilient import (
     BackendUnavailableError,
     MethodNotSupportedError,
@@ -59,7 +60,9 @@ def create_proxy_app(
 
     Reads the backend config file, when one is set, and raises ``ValueError``
     if it does not define exactly one server or its entry carries a key this
-    proxy does not apply (`check_backend_config`).
+    proxy does not apply (`check_backend_config`). Reads the overrides file,
+    when one is set, and raises ``ValueError`` if it is not valid
+    (`load_overrides`).
 
     The real backend connection is wrapped in a `ResilientBackend` so the
     proxy survives the backend being absent at startup and coming and going
@@ -74,6 +77,16 @@ def create_proxy_app(
     """
     settings = settings or get_settings()
     check_backend_config(settings)
+    overrides: Overrides | None = None
+    if settings.overrides:
+        loaded = load_overrides(settings.overrides)
+        overrides = loaded.overrides
+        logger.info(
+            "overrides: %s (sha256 %s): %s",
+            settings.overrides,
+            loaded.sha256,
+            overrides.summary(),
+        )
 
     resolved_factory: Callable[[], NegotiatedBackendClient]
     if backend_factory is not None:
@@ -138,6 +151,7 @@ def create_proxy_app(
         metadata=lambda: resilient.metadata,
         server_name=settings.server_name,
         lifespan=_lifespan,
+        overrides=overrides,
     )
 
     async def backend_status() -> dict[str, Any]:

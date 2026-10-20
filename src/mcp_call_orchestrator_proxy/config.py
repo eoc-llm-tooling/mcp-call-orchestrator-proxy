@@ -53,6 +53,14 @@ class ProxySettings(BaseSettings):
         description="Whether to verify the backend's TLS certificate. False for self-signed certs.",
     )
 
+    # What agents are told: the operator's description overrides (overrides.py).
+    overrides: str | None = Field(
+        default=None,
+        description="Path to a JSON overrides file that changes the descriptions "
+        "of the backend's tools, arguments, prompts and resources, and the "
+        "server's instructions. Unset: the backend's own texts.",
+    )
+
     # Our exposed (listen) server
     server_name: str = Field(
         default="mcp-call-orchestrator-proxy",

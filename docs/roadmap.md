@@ -111,6 +111,7 @@ Ideas without an issue or a release.
   not a limitation waiting to be lifted. Run a second proxy.
 - **Changing backend behaviour.** The proxy controls *access* to a backend; it never retries,
   reshapes or papers over its semantics. A tool that errors keeps erroring.
+  Description overrides change only what agents are told, never what the backend does.
 - **Authenticating the proxy's own clients.** It's a local, loopback-scoped service. (Container
   deployment may make this worth revisiting.)
 - **Publishing to a package index.** Deployment recipes, yes; distribution, no.

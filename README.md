@@ -39,6 +39,10 @@ server, unchanged except for the added stability.
   resources (including resource templates) and prompts. Hidden items are absent
   from listings and uncallable by name. Off by default (full parity). See
   [Exposure control](#exposure-control).
+- **Description overrides** — an optional file replaces, prepends to or appends
+  to the descriptions of the backend's tools, arguments, prompts and resources,
+  and its server instructions. Names and schemas stay the backend's own. See
+  [Description overrides](#description-overrides).
 
 ## Requirements
 
@@ -152,9 +156,10 @@ these instead. `MCP_PROXY_BACKEND_API_KEY` is required in this mode.
 | `MCP_PROXY_RESOURCE_DENY` | *(unset)* | Comma-separated resource URIs / template `uriTemplate`s to hide. Ignored when allow is set. |
 | `MCP_PROXY_PROMPT_ALLOW` | *(unset)* | Comma-separated prompt names to expose (exact match). When set, `MCP_PROXY_PROMPT_DENY` is ignored. |
 | `MCP_PROXY_PROMPT_DENY` | *(unset)* | Comma-separated prompt names to hide. Ignored when allow is set. |
+| `MCP_PROXY_OVERRIDES` | *(unset)* | Path to a JSON file overriding the backend's descriptions and instructions. See [Description overrides](#description-overrides). |
 
 The most commonly tuned values are also available as CLI flags
-(`--host`, `--port`, `--transport`, `--backend-config`, `--connect-timeout`,
+(`--host`, `--port`, `--transport`, `--backend-config`, `--overrides`, `--connect-timeout`,
 `--reconnect-initial-backoff`, `--reconnect-max-backoff`, `--log-level`) — run
 `uv run mcp-call-orchestrator-proxy --help` for the full list. CLI flags win over
 environment variables.
@@ -193,6 +198,55 @@ Rules:
 - Resource lists cover **concrete resources and resource templates** with the
   same name set (a template that could synthesize a hidden URI would otherwise
   bypass a resource allow-list).
+
+### Description overrides
+
+A backend's descriptions are written for everyone who uses it. To tell your
+agents something more specific, point `MCP_PROXY_OVERRIDES` (or `--overrides`)
+at a JSON file that changes them:
+
+```json
+{
+  "instructions": {"append": "Search before you create a note."},
+  "tools": {
+    "search": {
+      "description": {"prepend": "Prefer this over listing every note."},
+      "arguments": {
+        "query": {"append": "Plain words; no search operators."}
+      }
+    }
+  },
+  "prompts": {
+    "summarize": {"description": {"replace": "Summarize in three bullet points."}}
+  },
+  "resources": {
+    "notes://index": {"description": {"append": "Updated hourly."}}
+  }
+}
+```
+
+Rules:
+
+- **Text only** — names and schemas reach clients as the backend has them;
+  only the descriptions named in the file, and the instructions, change.
+- **Three operations** — `replace` sets the text; `prepend` and `append` (one
+  or both) add the operator's text before or after the backend's, separated by
+  a blank line. Where the backend has no text, the operator's stands alone.
+- **Keys are the backend's own names** — tool and prompt names, argument names,
+  a resource's URI or a template's `uriTemplate` (resources and templates share
+  the `resources` section, as in exposure control).
+- **Instructions** apply once the backend has connected: until the proxy has
+  seen the backend's own instructions, clients get none, as without a file.
+- **A file the proxy cannot apply stops it at startup** with an error naming
+  the file: one that cannot be read or parsed, an unknown key, an empty
+  operation or `replace` combined with another, or an entry for
+  `backend_status`, which is the proxy's own tool.
+- **Unknown names** — after the first successful listing, each tool, prompt,
+  resource or argument the backend does not have is reported once as a
+  `WARNING`. At startup an `INFO` record names the file, its SHA-256 and what it
+  overrides.
+- Results are relayed as the backend sends them: the description in a
+  `prompts/get` result is the backend's own.
 
 ## Usage
 
@@ -244,9 +298,9 @@ in the same guide.
 
 `MCP_PROXY_LOG_LEVEL` (or `--log-level`) controls verbosity: `DEBUG`, `INFO` (default),
 `WARNING`, `ERROR`, or `CRITICAL`. `WARNING`+ is backend outages and recoveries, plus what
-only the operator can fix: a misconfigured exposure filter, a call the backend never answered;
-`INFO` adds a record per call as it's queued and as it completes; `DEBUG` adds internal
-detail for fault-finding. A 2026-07-28 client's `Mcp-Param-*` headers are checked against the
+only the operator can fix: a misconfigured exposure filter or overrides file, a call the
+backend never answered; `INFO` adds a record per call as it's queued and as it completes;
+`DEBUG` adds internal detail for fault-finding. A 2026-07-28 client's `Mcp-Param-*` headers are checked against the
 tool list the proxy last served, so that check adds neither a record nor a backend call. A tool
 call, resource read or prompt request is looked up in what the proxy last listed to its
 clients, however long ago, so it adds only its own records; only a request made before any

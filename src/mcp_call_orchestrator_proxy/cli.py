@@ -77,6 +77,14 @@ def run(
             "(takes precedence over the individual backend env vars).",
         ),
     ] = None,
+    overrides_file: Annotated[
+        str | None,
+        typer.Option(
+            "--overrides",
+            help="Path to a JSON file overriding the backend's descriptions and "
+            "instructions. Overrides MCP_PROXY_OVERRIDES.",
+        ),
+    ] = None,
     connect_timeout: Annotated[
         float | None,
         typer.Option(
@@ -110,6 +118,8 @@ def run(
     overrides: dict[str, Any] = {}
     if backend_config is not None:
         overrides["backend_config"] = backend_config
+    if overrides_file is not None:
+        overrides["overrides"] = overrides_file
     if connect_timeout is not None:
         overrides["connect_timeout_seconds"] = connect_timeout
     if reconnect_initial_backoff is not None:

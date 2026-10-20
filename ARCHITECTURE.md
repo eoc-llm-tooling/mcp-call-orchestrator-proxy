@@ -16,17 +16,21 @@ concurrent MCP clients. It does three things and nothing more:
 
 To the client it looks like the backend itself: the proxy mirrors the backend's tools,
 resources, and prompts with their **exact original JSON schemas** (no lossy wrapper), plus
-one added `backend_status` tool.
+one added `backend_status` tool. An operator may change what agents are told about them, the
+description texts and the server's instructions, and nothing else.
 
 ## Design invariants
 
 These are load-bearing; changing any of them changes the product.
 
-- **Exact tool/schema parity.** The proxy exposes the backend's tools/resources/prompts
+- **Exact tool/schema parity.** Names and schema structure are always exact; text is exact
+  unless the operator overrides it. The proxy exposes the backend's tools/resources/prompts
   under their real names and schemas. Achieved by delegating to FastMCP's own
   `ProxyProvider` rather than re-declaring tools. Nothing to hand-sync. The server is
   built with `dereference_schemas=False`: FastMCP otherwise inlines every `$ref` and drops
   `$defs` on listing, which keeps the accepted inputs but changes the schema's structure.
+  The operator's overrides file changes only description texts and the instructions (see
+  [Description overrides](#description-overrides)).
 - **Exactly one backend.** A backend config that does not define exactly one server is
   refused at startup (`client.py::check_backend_config`, called by `create_proxy_app`) — a
   composite mount would prefix every tool name (`{server}_{tool}`) and break parity.
@@ -75,7 +79,7 @@ flowchart TD
     C["MCP client(s)<br/>(agents, tools)"] -->|"Streamable HTTP / stdio"| P
 
     subgraph proxy["mcp-call-orchestrator-proxy (one process)"]
-        P["FastMCP + ProxyProvider<br/>server.py — exact schema parity<br/>+ exposure visibility (exposure.py)<br/>+ header-check schemas (tool_schemas.py)"]
+        P["FastMCP + ProxyProvider<br/>server.py — exact schema parity<br/>+ description overrides (descriptions.py)<br/>+ exposure visibility (exposure.py)<br/>+ header-check schemas (tool_schemas.py)"]
         M["BackendMetadataMiddleware<br/>metadata.py — initialize / server/discover"]
         E["ExposureAuditBackend<br/>exposure_audit.py — filter-name audit"]
         Q["QueuedMCPBackend<br/>backend.py — queue-aware facade"]
@@ -111,6 +115,8 @@ the Protocol with what a connected client negotiated (capabilities, instructions
 |---|---|
 | [`cli.py`](src/mcp_call_orchestrator_proxy/cli.py) | Typer CLI (`run` subcommand). Maps flags to setting overrides, configures logging, turns off FastMCP's update check, then runs the app over stdio or Streamable HTTP. CLI flags win over env vars. |
 | [`config.py`](src/mcp_call_orchestrator_proxy/config.py) | `ProxySettings` (pydantic-settings, `MCP_PROXY_` prefix). Validates that a backend source is configured. |
+| [`overrides.py`](src/mcp_call_orchestrator_proxy/overrides.py) | The operator's overrides file: its schema (pydantic, unknown keys refused), `load_overrides` (read, validate, SHA-256 of the bytes) and the text operations `replace` / `prepend` / `append`. Pure apart from reading the file. |
+| [`descriptions.py`](src/mcp_call_orchestrator_proxy/descriptions.py) | `DescriptionOverrides` — a FastMCP transform on the `ProxyProvider` that hands on copies of the backend's items with the description texts the file names changed, and on the first successful listing of each surface warns once per name the backend does not have. Adds no backend call. |
 | [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant and refuses FastMCP's transform keys, both at startup; forces `keep_alive=False` on a stdio transport; gives the client a session that relays tool results without checking them against their output schema (`RelayClientSession`); gives a streamable-HTTP backend's client a read timeout longer than the call timeout; resolves a human-readable backend URL. |
 | [`interfaces.py`](src/mcp_call_orchestrator_proxy/interfaces.py) | `MCPBackendClient` Protocol — the structural contract every layer implements — and `NegotiatedBackendClient`, which adds what a connected client negotiated. |
 | [`resilient.py`](src/mcp_call_orchestrator_proxy/resilient.py) | `ResilientBackend` — owns the one live connection and a background supervisor that keeps it healthy across backend restarts. Sits *below* the orchestrator, so it never adds concurrency. Records what the backend negotiated (`BackendMetadata`) on each connect. Sources `backend_status`. |
@@ -118,10 +124,10 @@ the Protocol with what a connected client negotiated (capabilities, instructions
 | [`backend.py`](src/mcp_call_orchestrator_proxy/backend.py) | `QueuedMCPBackend` — thin facade that routes every `MCPBackendClient` operation through `orchestrator.submit(...)`. Its `__aenter__/__aexit__` are no-ops (the real connection is opened once by the lifespan, not per call). |
 | [`exposure.py`](src/mcp_call_orchestrator_proxy/exposure.py) | Exposure control, policy side. `resolve_policies` turns the six allow/deny settings into one policy per surface (pure: no I/O, no logging) plus the startup warnings; `apply_exposure_policy` enforces it with FastMCP's scoped `disable`/`enable` visibility on the server. |
 | [`exposure_audit.py`](src/mcp_call_orchestrator_proxy/exposure_audit.py) | `ExposureAuditBackend` — exposure control, audit side. A pass-through `MCPBackendClient` layer above the queue that compares the configured filter names with the backend's first successful listing per surface and warns once per unknown name. Filters and refuses nothing. |
-| [`server.py`](src/mcp_call_orchestrator_proxy/server.py) | `build_proxy_server` — a plain `FastMCP` server with FastMCP's `ProxyProvider` over the facade (not `FastMCPProxy`, not `create_proxy()`), so the duck-typed facade is driven as-is with exact schemas; installs `BackendMetadataMiddleware` and `ListedToolSchemas`, gives the MCP SDK's server its tool-schema lookup, and turns off FastMCP's `$ref` inlining (`dereference_schemas=False`). |
+| [`server.py`](src/mcp_call_orchestrator_proxy/server.py) | `build_proxy_server` — a plain `FastMCP` server with FastMCP's `ProxyProvider` over the facade (not `FastMCPProxy`, not `create_proxy()`), so the duck-typed facade is driven as-is with exact schemas; installs `BackendMetadataMiddleware` and `ListedToolSchemas`, adds `DescriptionOverrides` to the provider when an overrides file is set, gives the MCP SDK's server its tool-schema lookup, and turns off FastMCP's `$ref` inlining (`dereference_schemas=False`). |
 | [`tool_schemas.py`](src/mcp_call_orchestrator_proxy/tool_schemas.py) | `ListedToolSchemas` — middleware that records the tool list the proxy last served its clients, after exposure control, and answers the MCP SDK's input-schema lookup for the `Mcp-Param-*` header check from it. Never calls the backend. |
-| [`metadata.py`](src/mcp_call_orchestrator_proxy/metadata.py) | `BackendMetadataMiddleware` — the proxy's answer to `initialize` and `server/discover`: its own, plus the backend's `instructions`, with only the capabilities the backend has (tools always). Reads `ResilientBackend.metadata`; never calls the backend. |
-| [`app.py`](src/mcp_call_orchestrator_proxy/app.py) | Composition root. `create_proxy_app` wires settings → resilient → orchestrator → queued facade → exposure audit → proxy server, defines the lifespan, registers the proxy-native `backend_status` tool, applies the exposure policy and logs its startup warnings. |
+| [`metadata.py`](src/mcp_call_orchestrator_proxy/metadata.py) | `BackendMetadataMiddleware` — the proxy's answer to `initialize` and `server/discover`: its own, plus the backend's `instructions` as the overrides file changes them, with only the capabilities the backend has (tools always). Reads `ResilientBackend.metadata`; never calls the backend. |
+| [`app.py`](src/mcp_call_orchestrator_proxy/app.py) | Composition root. `create_proxy_app` loads the overrides file and logs its summary, wires settings → resilient → orchestrator → queued facade → exposure audit → proxy server, defines the lifespan, registers the proxy-native `backend_status` tool, applies the exposure policy and logs its startup warnings. |
 
 ## Request lifecycle (a tool call)
 
@@ -237,8 +243,8 @@ safely against a backend that cannot take them at once. Three levels, each with 
 
 | Level | Carries |
 |---|---|
-| `WARNING`+ | The backend went away; the backend came back. A call the backend did not answer within its timeout, and a call that timed out waiting in the queue behind it. A configuration only the operator can correct: at startup, an exposure policy the proxy narrowed (allow-list and deny-list both set for a surface; a tool filter that hides `backend_status`), and after the first successful listing of a surface, each filter name the backend does not have — each reported once. Quiet == healthy, so this level is what an alert rule watches. |
-| `INFO` | Two records per call — one on acceptance (client, op, queue depth), one on completion (queue wait, backend exec; for a call the backend declines, such as a method it does not implement, the completion record says so; for a call its caller withdrew before it started, the withdrawal is the second record). Arrival order vs. service order, which is the readable proof the queue works. A hang appears as an acceptance with no completion. The `Mcp-Param-*` header check on a 2026-07-28 tool call reads the tool list the proxy last served (`ListedToolSchemas`), so it adds no operation and no record. A tool call, resource read or prompt request is looked up in the listing last served for its surface, however old (see [Request lifecycle](#request-lifecycle-a-tool-call)), so it puts only itself on the queue; only a request made before any listing of its surface since the proxy started adds that listing, under its own client's tag. |
+| `WARNING`+ | The backend went away; the backend came back. A call the backend did not answer within its timeout, and a call that timed out waiting in the queue behind it. A configuration only the operator can correct: at startup, an exposure policy the proxy narrowed (allow-list and deny-list both set for a surface; a tool filter that hides `backend_status`), and after the first successful listing of a surface, each exposure filter name and each overrides-file name the backend does not have — each reported once. Quiet == healthy, so this level is what an alert rule watches. |
+| `INFO` | At startup, one record naming the overrides file, its SHA-256 and what it overrides, when one is set. Two records per call — one on acceptance (client, op, queue depth), one on completion (queue wait, backend exec; for a call the backend declines, such as a method it does not implement, the completion record says so; for a call its caller withdrew before it started, the withdrawal is the second record). Arrival order vs. service order, which is the readable proof the queue works. A hang appears as an acceptance with no completion. The `Mcp-Param-*` header check on a 2026-07-28 tool call reads the tool list the proxy last served (`ListedToolSchemas`), so it adds no operation and no record. A tool call, resource read or prompt request is looked up in the listing last served for its surface, however old (see [Request lifecycle](#request-lifecycle-a-tool-call)), so it puts only itself on the queue; only a request made before any listing of its surface since the proxy started adds that listing, under its own client's tag. |
 | `DEBUG` | One extra record when a call actually starts running, which separates *waiting in the queue* from *at the backend, unanswered* — the two hangs that otherwise look identical. |
 
 Two structural points, both load-bearing:
@@ -296,14 +302,15 @@ both.
   backend's session directly, outside the queue (see `protocol_version` above).
 - **Handshake.** `BackendMetadataMiddleware` answers `initialize` and `server/discover` with
   the proxy's own server identity and protocol version, adding the backend's `instructions`
-  and leaving out each capability the backend did not advertise (prompts, resources,
+  (replaced, or joined with the operator's text, where the overrides file says so) and leaving out each capability the backend did not advertise (prompts, resources,
   logging, completions, tasks), and each `experimental` or `extensions` entry whose
   identifier the backend does not have — clients would otherwise send requests the backend
   answers with "Method not found". A kept capability keeps the proxy's own flags, which
   describe what the proxy delivers. The tools capability stays: `backend_status` is always
   served. The values come from
   `ResilientBackend.metadata`; before the backend's first connect the proxy's own answer goes
-  out unchanged, with every capability the proxy has. The proxy routinely starts before its
+  out unchanged, with every capability the proxy has and no instructions, the operator's
+included: an `append` or `prepend` has no backend text to join yet. The proxy routinely starts before its
   backend, so clients often connect in that window, and a client keeps the capabilities it
   was given for its whole session: an unneeded capability costs it at most an empty listing
   (a backend's "Method not found" is logged at `INFO`), while a missing one would hide the
@@ -330,6 +337,10 @@ backend sources (see [`README.md`](README.md) for the full variable table):
   from the plain entry type (`StdioMCPServer` / `RemoteMCPServer`) in any case.
 - **Individual fields** (`backend_mcp_url` + `backend_api_key`) — the fallback, HTTP only; the
   API key is required in this mode.
+
+The operator's overrides file (`overrides`, `MCP_PROXY_OVERRIDES`) is separate from the backend
+source and optional; unset, every text is the backend's own. See
+[Description overrides](#description-overrides).
 
 TLS verification (`backend_verify_tls`, default `false`) is a separate knob in both modes,
 because the standard `mcpServers` format has no verify field.
@@ -371,3 +382,34 @@ A misconfigured filter never stops the proxy (OCP-C-007): an allow-list that ove
 deny-list, or a tool filter that hides `backend_status`, is logged as a `WARNING` at startup; a
 filter name the backend does not have is logged as a `WARNING` once per process. These are the
 operator-facing configuration records the severity rule admits at `WARNING`.
+
+## Description overrides
+
+An optional JSON file (`MCP_PROXY_OVERRIDES`) changes what agents are told about the backend:
+the descriptions of tools, tool arguments, prompts, prompt arguments, resources and resource
+templates, and the server's `instructions` (OCP-N-012, OCP-N-013). Each text is changed by
+`replace`, or by `prepend` and/or `append`, which join the operator's text and the backend's
+with a blank line; where the backend has no text, the operator's stands alone. Names, schema
+structure and everything else pass through as the backend has them; within a tool's input
+schema only a top-level property's `description` changes. Three places carry it:
+
+- **Loading at startup** (`overrides.py`). `create_proxy_app` reads and validates the file.
+  One the proxy cannot honour — unreadable, not JSON, an unknown key, an operation that is
+  empty or combines `replace` with another, an entry for `backend_status` (the proxy's own
+  tool, not the backend's) — stops it with an error naming the file (OCP-C-007). A valid one
+  is logged at `INFO` with its SHA-256 and a count of what it overrides.
+- **Items, as a transform on the provider** (`descriptions.py`). `DescriptionOverrides` is
+  added to the `ProxyProvider`, so it sees each of the backend's listings and each lookup, and
+  hands on copies: the provider's cache keeps the backend's own items, and each listing applies
+  the file afresh. Exposure control evaluates names above it, unchanged. On the first
+  successful listing of a surface it warns once per name the backend does not have — a tool,
+  prompt or resource, or an argument of one that exists; resources are checked against the
+  union of resource URIs and template `uriTemplate`s, once both listings have succeeded. It
+  reads only the listings the proxy already makes.
+- **Instructions, in the handshake answer** (`metadata.py`). `BackendMetadataMiddleware`
+  applies the file's `instructions` operation to the instructions the backend last negotiated.
+  Before the backend's first connect the answer carries no instructions, as without a file.
+
+The results of calls, reads and prompt requests are relayed as the backend sent them; a
+`prompts/get` result keeps the description the backend gives it there. Overrides change only
+what agents are told, never what the backend does (OCP-C-002).
