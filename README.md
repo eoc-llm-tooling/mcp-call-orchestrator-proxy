@@ -101,9 +101,9 @@ part of the `mcpServers` format, so it stays a separate knob
 (`MCP_PROXY_BACKEND_VERIFY_TLS`, default `false`). An example lives at
 [`deploy/systemd/backend.example.json`](deploy/systemd/backend.example.json).
 
-FastMCP's own extensions to the entry — `tools`, `include_tags` and
-`exclude_tags` — are not supported: an entry that sets any of them stops the
-proxy at startup with an error naming the key.
+FastMCP's own extensions to the entry are covered in
+[FastMCP config extensions](#fastmcp-config-extensions): `tools` is honoured in
+part, and the tag keys are refused.
 
 The backend can just as well be a **stdio server** — most of the MCP ecosystem
 ships this way — described the same way any MCP client would describe it:
@@ -191,6 +191,9 @@ Rules:
 - **`backend_status` is not special** — it is filtered like any other tool. If
   a tool allow-list omits it (or a deny-list names it), a `WARNING` is logged
   once at startup; the filter is still honoured.
+- **The backend config can disable a tool** — `"enabled": false` in its
+  `tools` key hides the tool whatever these settings say; see
+  [FastMCP config extensions](#fastmcp-config-extensions).
 - **Unknown filter names** — after the first successful discovery for a
   surface, each name that does not exist on the backend is reported once per
   process as a `WARNING` (typos / stale lists). Startup is never blocked by a
@@ -198,6 +201,49 @@ Rules:
 - Resource lists cover **concrete resources and resource templates** with the
   same name set (a template that could synthesize a hidden URI would otherwise
   bypass a resource allow-list).
+
+### FastMCP config extensions
+
+A backend entry written for FastMCP may carry a `tools` key. The proxy applies
+the parts of it that change only what agents are told, or what they can call:
+
+```json
+{
+  "mcpServers": {
+    "some-mcp-server": {
+      "command": "uv",
+      "args": ["run", "some-mcp-server"],
+      "tools": {
+        "search": {
+          "description": "Search the notes by keyword.",
+          "arguments": {"query": {"description": "Plain words."}}
+        },
+        "delete_note": {"enabled": false}
+      }
+    }
+  }
+}
+```
+
+- **`description`** of a tool, and of each of its `arguments`, replaces the
+  backend's text, like a `replace` in the
+  [overrides file](#description-overrides), and a name the backend does not
+  have is reported in the same way. Where the overrides file sets the same text,
+  the file's entry applies and a `WARNING` names the text at startup.
+- **`enabled: false`** hides the tool and makes it uncallable, as a
+  `MCP_PROXY_TOOL_DENY` entry does. It wins over `MCP_PROXY_TOOL_ALLOW`: a tool
+  both name stays hidden, with a `WARNING` at startup.
+- **Every other field** stops the proxy at startup with an error naming the
+  field and why: renaming a tool or an argument, hiding, defaulting or
+  requiring an argument, `examples`, `title`, `version`, `tags` and `meta`, and
+  an entry for `backend_status`.
+- At startup an `INFO` record counts what the key applied.
+
+`include_tags` and `exclude_tags` are not supported and stop the proxy at
+startup; use exposure control to choose which tools are exposed.
+
+The `tools` key never changes how the proxy reaches the backend: the stdio
+process and TLS settings are the same with it as without it.
 
 ### Description overrides
 

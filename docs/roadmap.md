@@ -30,9 +30,9 @@ nothing here is a scheduled commitment, and the order changes when a real need d
   `cwd` in the `mcpServers` config) gets the same serialization, schema parity and resilience
   as an HTTP backend. The proxy owns that subprocess's whole life: starts
   it on connect, keeps it across reconnects, and kills it on break or shutdown — no orphaned
-  child left behind. An entry with FastMCP's transform keys (`tools`, `include_tags`,
-  `exclude_tags`), which would put a nested proxy in front of the subprocess, is refused at
-  startup.
+  child left behind. FastMCP's extension keys never put the nested proxy FastMCP would build
+  for them in front of the subprocess: `tools` is honoured in part, as text overrides and
+  exposure-control entries, and `include_tags` / `exclude_tags` are refused at startup.
 - **Exposure control** — exact-name allow-list or deny-list per surface (tools, resources
   including templates, prompts). Hidden items are absent from listings and uncallable.
   Allow beats deny when both are set for a surface; `backend_status` is filtered like any
@@ -114,6 +114,8 @@ Ideas without an issue or a release.
   Description overrides change only what agents are told, never what the backend does.
 - **Authenticating the proxy's own clients.** It's a local, loopback-scoped service. (Container
   deployment may make this worth revisiting.)
+- **Tag filtering in the backend config** (`include_tags` / `exclude_tags`). Exposure control
+  covers it.
 - **Publishing to a package index.** Deployment recipes, yes; distribution, no.
 
 [#1]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/1

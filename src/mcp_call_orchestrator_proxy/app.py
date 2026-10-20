@@ -24,6 +24,10 @@ from mcp_call_orchestrator_proxy.client import (
     resolve_backend_url,
 )
 from mcp_call_orchestrator_proxy.config import ProxySettings, get_settings
+from mcp_call_orchestrator_proxy.config_extensions import (
+    combine_overrides,
+    read_config_extensions,
+)
 from mcp_call_orchestrator_proxy.exposure import (
     apply_exposure_policy,
     resolve_policies,
@@ -60,8 +64,9 @@ def create_proxy_app(
     """Build a fully wired proxy application. Performs no network I/O.
 
     Reads the backend config file, when one is set, and raises ``ValueError``
-    if it does not define exactly one server or its entry carries a key this
-    proxy does not apply (`check_backend_config`). Reads the overrides file,
+    if it does not define exactly one server (`check_backend_config`) or its
+    entry carries a FastMCP key this proxy does not apply
+    (`read_config_extensions`). Reads the overrides file,
     when one is set, and raises ``ValueError`` if it is not valid
     (`load_overrides`).
 
@@ -88,6 +93,16 @@ def create_proxy_app(
             loaded.sha256,
             overrides.summary(),
         )
+    extensions = read_config_extensions(settings)
+    if extensions is not None:
+        overrides, conflicts = combine_overrides(overrides, extensions.overrides)
+        for conflict in conflicts:
+            logger.warning(
+                "overrides: %s is set by both the overrides file and the backend "
+                "config; the overrides file's entry applies",
+                conflict,
+            )
+        logger.info("backend config: tools key applied: %s", extensions.summary())
 
     resolved_factory: Callable[[], NegotiatedBackendClient]
     if backend_factory is not None:
@@ -141,7 +156,10 @@ def create_proxy_app(
 
     # Exposure control: resolve filter policy (pure), wrap discovery for S-4
     # audit above the queue, then apply native visibility after registration.
-    resolution = resolve_policies(settings)
+    resolution = resolve_policies(
+        settings,
+        disabled_tools=extensions.disabled_tools if extensions else frozenset(),
+    )
     audit_backend = ExposureAuditBackend(queued_backend, resolution.policies)
 
     @asynccontextmanager
