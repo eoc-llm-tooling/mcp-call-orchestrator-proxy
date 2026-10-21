@@ -16,8 +16,10 @@ process on loopback stdio pipes.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -128,6 +130,32 @@ async def test_proxy_kills_the_stdio_backend_process_when_it_stops(
         assert isinstance(backend_pid, int)
         assert _pid_is_alive(backend_pid)
 
+    await _wait_until_dead(backend_pid)
+
+
+@pytest.mark.asyncio
+async def test_a_tools_key_applies_and_leaves_the_stdio_transport_as_it_is(
+    stdio_backend_config_file,
+) -> None:
+    """FastMCP's ``tools`` key is honoured without the nested proxy FastMCP would
+    build for it: the proxy still owns the child, and kills it when it stops."""
+    path = Path(stdio_backend_config_file())
+    config = json.loads(path.read_text())
+    config["mcpServers"]["probe-backend"]["tools"] = {
+        "echo": {"description": "Repeat a value."},
+        "crash": {"enabled": False},
+    }
+    path.write_text(json.dumps(config))
+    proxy_app = create_proxy_app(settings=ProxySettings(backend_config=str(path)))
+
+    async with Client(proxy_app.mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+        backend_pid = (await client.call_tool("pid", {})).data
+        assert isinstance(backend_pid, int)
+        assert _pid_is_alive(backend_pid)
+
+    assert tools["echo"].description == "Repeat a value."
+    assert "crash" not in tools
     await _wait_until_dead(backend_pid)
 
 

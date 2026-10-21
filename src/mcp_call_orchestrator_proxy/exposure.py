@@ -60,12 +60,18 @@ SURFACE_COMPONENTS: Mapping[Surface, frozenset[str]] = {
 }
 
 
-def resolve_policies(settings: ProxySettings) -> ExposureResolution:
+def resolve_policies(
+    settings: ProxySettings, disabled_tools: frozenset[str] = frozenset()
+) -> ExposureResolution:
     """Turn the six filter fields into one resolved policy per surface.
 
     Pure: no I/O, no logging. Never raises for filter content. When both
     allow and deny are set for a surface, allow wins and a warning string is
     produced for the composition root to log.
+
+    ``disabled_tools`` (the backend config's ``enabled: false`` tools) are
+    hidden whatever the settings say: added to a tool deny-list, or taken out
+    of a tool allow-list, with a warning for each the allow-list named.
     """
     pairs: tuple[
         tuple[Surface, tuple[str, ...] | None, tuple[str, ...] | None], ...
@@ -99,6 +105,21 @@ def resolve_policies(settings: ProxySettings) -> ExposureResolution:
             policies[surface] = ResolvedPolicy(mode=PolicyMode.UNSET, names=frozenset())
 
     tool_pol = policies[Surface.TOOL]
+    if disabled_tools:
+        if tool_pol.mode == PolicyMode.ALLOW:
+            for name in sorted(tool_pol.names & disabled_tools):
+                warnings.append(
+                    f"exposure: tool {name!r} is in the tool allow-list but the "
+                    "backend config disables it; it stays hidden"
+                )
+            tool_pol = ResolvedPolicy(
+                mode=PolicyMode.ALLOW, names=tool_pol.names - disabled_tools
+            )
+        else:
+            tool_pol = ResolvedPolicy(
+                mode=PolicyMode.DENY, names=tool_pol.names | disabled_tools
+            )
+        policies[Surface.TOOL] = tool_pol
     excluded = (
         tool_pol.mode == PolicyMode.ALLOW
         and BACKEND_STATUS_TOOL_NAME not in tool_pol.names

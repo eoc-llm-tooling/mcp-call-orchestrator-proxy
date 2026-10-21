@@ -13,11 +13,13 @@ Two backend sources are supported (see `ProxySettings`):
   format has no verify field.
 - The individual `backend_mcp_url` + `backend_api_key` fields (fallback).
 
-A config that does not define exactly one server, and FastMCP's transform keys
-(`tools`, `include_tags`, `exclude_tags`), are refused at startup
-(`check_backend_config`). FastMCP applies the transform keys through a nested
-in-process proxy around the real transport, out of reach of the `keep_alive`
-and TLS settings this module applies.
+A config that does not define exactly one server is refused at startup
+(`check_backend_config`). FastMCP applies its own extension keys (`tools`,
+`include_tags`, `exclude_tags`) through a nested in-process proxy around the
+real transport, out of reach of the `keep_alive` and TLS settings this module
+applies, so the transport is always built from the plain entry type. Of those
+keys, `tools` is honoured in part and the two tag keys are refused, both at
+startup (`config_extensions.py`).
 
 The client relays tool results without checking them against the tool's
 declared output schema (`RelayClientSession`); the proxy's own clients check
@@ -44,8 +46,6 @@ from mcp import types as mcp_types
 from mcp.client.session import ClientSession
 
 from mcp_call_orchestrator_proxy.config import ProxySettings
-
-_UNSUPPORTED_ENTRY_KEYS = ("tools", "include_tags", "exclude_tags")
 
 # How much longer the backend client's own timeouts - the MCP request's and the
 # HTTP read's - run than a call may take, so the queue's is the one that fires.
@@ -196,29 +196,14 @@ def _require_single_server(config: MCPConfig, config_path: str) -> None:
 
 
 def check_backend_config(settings: ProxySettings) -> None:
-    """Refuse a backend config this proxy cannot honour.
+    """Refuse a backend config that does not define exactly one server.
 
-    Called once at startup, so the proxy does not start on such a config. It
-    refuses a config that does not define exactly one server, and an entry
-    that carries a FastMCP transform key. A key is refused whatever its value:
-    FastMCP reads an empty one as absent, but the operator still wrote it.
+    Called once at startup, so the proxy does not start on such a config.
     """
     if not settings.backend_config:
         return
     config = MCPConfig.from_file(Path(settings.backend_config))
     _require_single_server(config, settings.backend_config)
-    for name, server in config.mcpServers.items():
-        given = server.model_fields_set | set(server.model_extra or {})
-        refused = [key for key in _UNSUPPORTED_ENTRY_KEYS if key in given]
-        if refused:
-            keys = ", ".join(repr(key) for key in refused)
-            them = "it" if len(refused) == 1 else "them"
-            raise ValueError(
-                f"Backend config {settings.backend_config!r}: server {name!r} sets "
-                f"{keys}, which this proxy does not apply: FastMCP implements "
-                f"{them} with a nested proxy that bypasses this proxy's transport "
-                f"settings. Remove {them} from the entry."
-            )
 
 
 def resolve_backend_url(settings: ProxySettings) -> str:

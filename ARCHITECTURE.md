@@ -115,10 +115,11 @@ the Protocol with what a connected client negotiated (capabilities, instructions
 |---|---|
 | [`cli.py`](src/mcp_call_orchestrator_proxy/cli.py) | Typer CLI (`run` subcommand). Maps flags to setting overrides, configures logging, turns off FastMCP's update check, then runs the app over stdio or Streamable HTTP. CLI flags win over env vars. |
 | [`config.py`](src/mcp_call_orchestrator_proxy/config.py) | `ProxySettings` (pydantic-settings, `MCP_PROXY_` prefix). Validates that a backend source is configured. |
+| [`config_extensions.py`](src/mcp_call_orchestrator_proxy/config_extensions.py) | FastMCP's extension keys in the backend entry, read at startup: `tools` translated into text overrides and exposure-control deny entries, every field it cannot apply refused with an error naming it and why; `include_tags` / `exclude_tags` refused. `combine_overrides` lets the overrides file win over the config's descriptions. |
 | [`overrides.py`](src/mcp_call_orchestrator_proxy/overrides.py) | The operator's overrides file: its schema (pydantic, unknown keys refused), `load_overrides` (read, validate, SHA-256 of the bytes) and the text operations `replace` / `prepend` / `append`. Pure apart from reading the file. |
 | [`descriptions.py`](src/mcp_call_orchestrator_proxy/descriptions.py) | `DescriptionOverrides` — a FastMCP transform on the `ProxyProvider` that hands on copies of the backend's items with the description texts the file names changed; `PromptResultDescriptions` — middleware that applies a prompt's override to its `prompts/get` result. Adds no backend call. |
 | [`overrides_audit.py`](src/mcp_call_orchestrator_proxy/overrides_audit.py) | `OverridesAudit` — a connect listener on `ResilientBackend`: when the backend first connects, it lists every surface the backend advertises through the queue, as the proxy's own calls, and warns once per overrides-file name the backend does not have. Runs again on the next connect only if a check did not complete. |
-| [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant and refuses FastMCP's transform keys, both at startup; forces `keep_alive=False` on a stdio transport; gives the client a session that relays tool results without checking them against their output schema (`RelayClientSession`); gives a streamable-HTTP backend's client a read timeout longer than the call timeout; resolves a human-readable backend URL. |
+| [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant at startup; builds the transport from the plain entry type whatever FastMCP extension keys the entry carries; forces `keep_alive=False` on a stdio transport; gives the client a session that relays tool results without checking them against their output schema (`RelayClientSession`); gives a streamable-HTTP backend's client a read timeout longer than the call timeout; resolves a human-readable backend URL. |
 | [`interfaces.py`](src/mcp_call_orchestrator_proxy/interfaces.py) | `MCPBackendClient` Protocol — the structural contract every layer implements — and `NegotiatedBackendClient`, which adds what a connected client negotiated. |
 | [`resilient.py`](src/mcp_call_orchestrator_proxy/resilient.py) | `ResilientBackend` — owns the one live connection and a background supervisor that keeps it healthy across backend restarts. Sits *below* the orchestrator, so it never adds concurrency. Records what the backend negotiated (`BackendMetadata`) on each connect, and starts each connect listener as a task beside the held connection. Sources `backend_status`. |
 | [`orchestrator.py`](src/mcp_call_orchestrator_proxy/orchestrator.py) | `CallOrchestrator` — MCP-agnostic queue. A single dispatcher pulls FIFO and runs each call as its own task, gated by a semaphore. A call's wait in the queue and its run are each timed out from their own start, so one hang can't wedge the queue; a call whose caller is gone before it starts is dropped and never runs. |
@@ -249,8 +250,8 @@ safely against a backend that cannot take them at once. Three levels, each with 
 
 | Level | Carries |
 |---|---|
-| `WARNING`+ | The backend went away; the backend came back. A call the backend did not answer within its timeout, and a call that timed out waiting in the queue behind it. A configuration only the operator can correct: at startup, an exposure policy the proxy narrowed (allow-list and deny-list both set for a surface; a tool filter that hides `backend_status`), after the first successful listing of a surface, each exposure filter name the backend does not have, and when the backend first connects, each overrides-file name it does not have — each reported once. Quiet == healthy, so this level is what an alert rule watches. |
-| `INFO` | At startup, one record naming the overrides file, its SHA-256 and what it overrides, when one is set. Two records per call — one on acceptance (client, op, queue depth), one on completion (queue wait, backend exec; for a call the backend declines, such as a method it does not implement, the completion record says so; for a call its caller withdrew before it started, the withdrawal is the second record). Arrival order vs. service order, which is the readable proof the queue works. A hang appears as an acceptance with no completion. The `Mcp-Param-*` header check on a 2026-07-28 tool call reads the tool list the proxy last served (`ListedToolSchemas`), so it adds no operation and no record. A tool call, resource read or prompt request is looked up in the listing last served for its surface, however old (see [Request lifecycle](#request-lifecycle-a-tool-call)), so it puts only itself on the queue; only a request made before any listing of its surface since the proxy started adds that listing, under its own client's tag. |
+| `WARNING`+ | The backend went away; the backend came back. A call the backend did not answer within its timeout, and a call that timed out waiting in the queue behind it. A configuration only the operator can correct: at startup, an exposure policy the proxy narrowed (allow-list and deny-list both set for a surface; a tool filter that hides `backend_status`; a tool the allow-list names and the backend config disables), a description both the overrides file and the backend config set, after the first successful listing of a surface, each exposure filter name the backend does not have, and when the backend first connects, each overrides-file name it does not have — each reported once. Quiet == healthy, so this level is what an alert rule watches. |
+| `INFO` | At startup, one record naming the overrides file, its SHA-256 and what it overrides, when one is set, and one counting what the backend config's `tools` key applies, when it has one. Two records per call — one on acceptance (client, op, queue depth), one on completion (queue wait, backend exec; for a call the backend declines, such as a method it does not implement, the completion record says so; for a call its caller withdrew before it started, the withdrawal is the second record). Arrival order vs. service order, which is the readable proof the queue works. A hang appears as an acceptance with no completion. The `Mcp-Param-*` header check on a 2026-07-28 tool call reads the tool list the proxy last served (`ListedToolSchemas`), so it adds no operation and no record. A tool call, resource read or prompt request is looked up in the listing last served for its surface, however old (see [Request lifecycle](#request-lifecycle-a-tool-call)), so it puts only itself on the queue; only a request made before any listing of its surface since the proxy started adds that listing, under its own client's tag. |
 | `DEBUG` | One extra record when a call actually starts running, which separates *waiting in the queue* from *at the backend, unanswered* — the two hangs that otherwise look identical. |
 
 Two structural points, both load-bearing:
@@ -334,13 +335,25 @@ backend sources (see [`README.md`](README.md) for the full variable table):
   branching needed in this proxy beyond the `keep_alive` override above and the TLS `verify`
   kwarg only applying to HTTP/SSE. Wins when set.
 
-  FastMCP's transform keys (`tools`, `include_tags`, `exclude_tags`) are refused at startup
-  (`client.py::check_backend_config`, called by `create_proxy_app`), whatever their value, with
-  an error naming the key. FastMCP parses an entry that carries one as a *transforming* server,
-  whose own `to_transport()` returns a `FastMCPTransport` around a nested in-process proxy of
-  the real transport: the `keep_alive` override and the TLS setting would not reach the real
-  transport, and the transforms could change tool names and schemas. The transport is built
-  from the plain entry type (`StdioMCPServer` / `RemoteMCPServer`) in any case.
+  FastMCP's extension keys (`tools`, `include_tags`, `exclude_tags`) never change the
+  transport. FastMCP parses an entry that carries one as a *transforming* server, whose own
+  `to_transport()` returns a `FastMCPTransport` around a nested in-process proxy of the real
+  transport: the `keep_alive` override and the TLS setting would not reach the real transport.
+  The transport is built from the plain entry type (`StdioMCPServer` / `RemoteMCPServer`) in
+  any case, and the keys are read at startup instead (`config_extensions.py`, called by
+  `create_proxy_app`; OCP-N-009):
+
+  - `tools` is honoured in part. A tool's `description` and its arguments' `description`
+    become text overrides (`replace`; see [Description overrides](#description-overrides)).
+    `enabled: false` becomes an exposure-control deny entry: FastMCP's own handling only drops
+    the tool from listings and leaves it callable. Every other field — a rename of a tool or an
+    argument, a hidden, defaulted or required argument, examples, a title, version, tags or
+    metadata, an entry for `backend_status` — would change a name, a schema or metadata, and
+    stops the proxy with an error naming each such key and why.
+  - `include_tags` and `exclude_tags` are refused, whatever their value, with an error that
+    points to the tool allow-list and deny-list. Exposure control already decides what is
+    exposed, by exact name; tag filtering would be a second way to do the same, depending on
+    metadata the backend controls.
 - **Individual fields** (`backend_mcp_url` + `backend_api_key`) — the fallback, HTTP only; the
   API key is required in this mode.
 
@@ -370,7 +383,10 @@ library-wide settings as it owns the logging configuration. An operator who sets
 
 Optional allow-lists and deny-lists of exact names, per surface (tools; resources and resource
 templates as one surface; prompts), set by six `MCP_PROXY_*_ALLOW` / `*_DENY` settings. Off by
-default, which keeps full parity. Two modules, at two places in the chain:
+default, which keeps full parity. A tool the backend config's `tools` key marks
+`enabled: false` joins the tool deny-list, or is taken out of a tool allow-list that names it,
+with a `WARNING` at startup: the narrower direction (OCP-C-007). Two modules, at two places in
+the chain:
 
 - **Enforcement at the server** (`exposure.py`). `resolve_policies` resolves each surface to
   unset, allow or deny — an allow-list decides alone when both are set — and `apply_exposure_policy`
@@ -397,7 +413,7 @@ templates, and the server's `instructions` (OCP-N-012, OCP-N-013). Each text is 
 `replace`, or by `prepend` and/or `append`, which join the operator's text and the backend's
 with a blank line; where the backend has no text, the operator's stands alone. Names, schema
 structure and everything else pass through as the backend has them; within a tool's input
-schema only a top-level property's `description` changes. Four places carry it:
+schema only a top-level property's `description` changes. Five places carry it:
 
 - **Loading at startup** (`overrides.py`). `create_proxy_app` reads and validates the file.
   One the proxy cannot honour stops it with an error naming the file and the path of each
@@ -419,8 +435,11 @@ schema only a top-level property's `description` changes. Four places carry it:
   calls, and warns once per name the backend does not have — a tool, prompt or resource, or an
   argument of one that exists; resources are checked against resource URIs and template
   `uriTemplate`s together. A check the backend interrupts runs again on the next connect;
-  once one completes, later connects do not repeat it. Without an overrides file nothing is
-  listed.
+  once one completes, later connects do not repeat it. Without overrides, from the file or the
+  backend config's `tools` key, nothing is listed.
+- **The backend config's `tools` key** (`config_extensions.py`). Its descriptions join the
+  file's as `replace` operations. For a text both set, the file's entry applies to the
+  backend's own text, the config's is dropped, and a `WARNING` at startup names it.
 - **Instructions, in the handshake answer** (`metadata.py`). `BackendMetadataMiddleware`
   applies the file's `instructions` operation to the instructions the backend last negotiated.
   Before the backend's first connect the answer carries no instructions, as without a file.

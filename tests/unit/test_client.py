@@ -5,9 +5,9 @@ onto the resulting `Client`'s transport correctly. Constructing a
 `StdioTransport` does not spawn a subprocess either - only `.connect()` does -
 so the keep_alive tests below stay offline like the rest of this tier.
 
-Also verifies that a backend entry carrying a FastMCP transform key stops the
-proxy at startup, and that the transport is built from the plain entry type
-regardless.
+Also verifies that the transport is built from the plain entry type whatever
+FastMCP extension keys the entry carries (see ``test_config_extensions`` for
+what the proxy does with those keys).
 """
 
 import json
@@ -127,31 +127,6 @@ def test_http_entry_with_a_transform_key_still_gets_the_tls_setting(
 
     assert isinstance(client.transport, StreamableHttpTransport)
     assert client.transport.verify is True
-
-
-@pytest.mark.parametrize(
-    ("key", "value"),
-    [*TRANSFORM_KEYS, ("tools", {}), ("include_tags", None)],
-)
-def test_a_transform_key_in_the_entry_stops_the_proxy_at_startup(
-    tmp_path: Path, key: str, value: Any
-) -> None:
-    """Refused whatever its value - including one FastMCP itself reads as
-    absent - with an error naming the key."""
-    config = _write_config(tmp_path, {"command": "some-mcp-server", key: value})
-
-    with pytest.raises(ValueError, match=f"'probe' sets '{key}'"):
-        create_proxy_app(settings=ProxySettings(backend_config=config))
-
-
-def test_every_transform_key_present_is_named(tmp_path: Path) -> None:
-    config = _write_config(
-        tmp_path,
-        {"command": "some-mcp-server", "tools": {"echo": {}}, "exclude_tags": ["a"]},
-    )
-
-    with pytest.raises(ValueError, match="sets 'tools', 'exclude_tags'"):
-        create_proxy_app(settings=ProxySettings(backend_config=config))
 
 
 def test_a_plain_entry_starts_the_proxy(tmp_path: Path) -> None:
