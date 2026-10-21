@@ -6,11 +6,13 @@ nothing here is a scheduled commitment, and the order changes when a real need d
 ## Where it is today
 
 - **Exact parity** with the backend's tools, resources and prompts — real names, original
-  schemas with their `$ref`s and `$defs` as the backend wrote them, nothing hand-synced.
+  schemas with their `$ref`s and `$defs` as the backend wrote them, nothing hand-synced. Text
+  is the backend's unless the operator overrides it.
 - **Calls are serialized** through one FIFO queue with a configurable limit (default `1`). One
   timeout bounds a call's wait in the queue and its backend call, each from its own start, so a
   single hung call can't wedge the rest, and a call whose client gave up before it started never
-  reaches the backend.
+  reaches the backend. A tool call, resource read or prompt request puts only itself on the
+  queue: its item is looked up in the listing the proxy last served, however old.
 - **Results are relayed as the backend sent them**, a result that does not match the tool's own
   output schema included; the clients check what they receive.
 - **Multi-client safe** — independent clients connect over HTTP at once without cross-talk;
@@ -37,26 +39,16 @@ nothing here is a scheduled commitment, and the order changes when a real need d
   including templates, prompts). Hidden items are absent from listings and uncallable.
   Allow beats deny when both are set for a surface; `backend_status` is filtered like any
   other tool (with a startup warning if the operator's config excludes it). Off by default.
+- **Description overrides** — an operator file replaces, appends to or prepends to the
+  descriptions of tools, arguments, prompts and resources, and the server's `instructions`,
+  without touching names or schema structure. The file is checked at startup, and its names
+  against the backend's once the backend first connects.
 
 ---
 
 ## Next
 
-The next release. Each issue is merged and verified on its own; the milestone holds the release's
-issues.
-
-### v0.6.0 Description overrides
-
-What agents are told about the backend becomes the operator's to tune; names and schema
-structure stay exact.
-
-- [#7] — override the descriptions of tools, arguments, prompts and resources, and the
-  server's `instructions`, from an operator file. Depends on [#5].
-- [#8] — honour the safe subset of FastMCP's `"tools"` key in the backend config, as text
-  overrides and exposure-control entries; reject the rest at startup. Depends on [#1] and
-  [#7].
-- [#24] — a tool call made more than 300 s after the last tool listing puts a `tools/list` on
-  the backend's queue, logged as that client's.
+No release is planned. Open defects are tracked as issues.
 
 ---
 
@@ -65,8 +57,8 @@ structure stay exact.
 ### Container image
 
 The `systemd --user` and `supervisord` recipes both assume a Python toolchain and a checkout on
-the host. That assumption doesn't hold everywhere the proxy is useful. Not planned for any of
-the releases above.
+the host. That assumption doesn't hold everywhere the proxy is useful. Not planned for a
+release.
 
 **Intent.** A container image. Configure and inject the backend secret the way a container
 operator normally would; no Python toolchain on the host; the secret never baked into an image
@@ -117,9 +109,3 @@ Ideas without an issue or a release.
 - **Tag filtering in the backend config** (`include_tags` / `exclude_tags`). Exposure control
   covers it.
 - **Publishing to a package index.** Deployment recipes, yes; distribution, no.
-
-[#1]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/1
-[#5]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/5
-[#7]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/7
-[#8]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/8
-[#24]: https://github.com/eoc-llm-tooling/mcp-call-orchestrator-proxy/issues/24
