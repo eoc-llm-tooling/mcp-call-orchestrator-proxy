@@ -29,6 +29,10 @@ rejects a call to it that does not carry the header. ``mismatched_output``
 returns structured content its own declared output schema rejects, as a backend
 with a schema bug does.
 
+Besides tools it serves one resource (``STATIC_RESOURCE_URI``), one resource
+template (``RESOURCE_TEMPLATE``) and one prompt (``greet``), so each kind of
+lookup a client request makes has something real to find.
+
 Run as a script; it either binds the loopback port it is given and serves
 Streamable HTTP on it, or serves over stdio::
 
@@ -60,6 +64,9 @@ from mcp import types as mcp_types
 from pydantic import Field
 
 INSTRUCTIONS = "PROBE BACKEND INSTRUCTIONS"
+
+STATIC_RESOURCE_URI = "probe://static"
+RESOURCE_TEMPLATE = "probe://item/{name}"
 
 # `mismatched_output` declares this schema and returns content it rejects.
 MISMATCHED_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -179,6 +186,21 @@ def build_server(*, legacy: bool = False) -> FastMCP:
     async def env_var(name: str) -> str | None:
         """Report the value of one environment variable in this process."""
         return os.environ.get(name)
+
+    @mcp.resource(STATIC_RESOURCE_URI)
+    async def static_resource() -> str:
+        """A fixed text resource."""
+        return "static"
+
+    @mcp.resource(RESOURCE_TEMPLATE)
+    async def item(name: str) -> str:
+        """A text resource per name: the name itself."""
+        return name
+
+    @mcp.prompt
+    async def greet(name: str) -> str:
+        """A one-message prompt that greets ``name``."""
+        return f"Hello, {name}."
 
     return mcp
 

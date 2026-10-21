@@ -130,7 +130,14 @@ the Protocol with what a connected client negotiated (capabilities, instructions
    the tool's input schema, when the call has arguments or such headers, and refuses a mismatch
    with HTTP 400. It takes the schema from `ListedToolSchemas`, the tool list the proxy last
    served; a tool that list does not carry is not checked. The `FastMCP` server receives the
-   call and looks the tool up in `ProxyProvider`'s cached listing.
+   call and looks the tool up in `ProxyProvider`'s cached listing: the backend's tools as last
+   listed to a client. The cache never expires (`cache_ttl=math.inf` in `server.py`) and is
+   replaced by each listing a client is served, so the lookup agrees with the tool list clients
+   receive and adds no backend call however old that listing is. A call made before any client
+   has listed tools since the proxy started has no listing to resolve from, and its lookup
+   lists the backend first, through the queue under the calling client's tag. Resource reads
+   and prompt requests are looked up the same way, in the resource, resource template and
+   prompt listings.
 2. FastMCP's visibility filter refuses a tool that exposure control hides, as unknown. For a
    visible tool, `ProxyProvider` opens `async with backend:` around the operation and, since
    the backend reports no 2026-07-28 version, calls `call_tool_mcp` on `ExposureAuditBackend`,
@@ -231,7 +238,7 @@ safely against a backend that cannot take them at once. Three levels, each with 
 | Level | Carries |
 |---|---|
 | `WARNING`+ | The backend went away; the backend came back. A call the backend did not answer within its timeout, and a call that timed out waiting in the queue behind it. A configuration only the operator can correct: at startup, an exposure policy the proxy narrowed (allow-list and deny-list both set for a surface; a tool filter that hides `backend_status`), and after the first successful listing of a surface, each filter name the backend does not have — each reported once. Quiet == healthy, so this level is what an alert rule watches. |
-| `INFO` | Two records per call — one on acceptance (client, op, queue depth), one on completion (queue wait, backend exec; for a call the backend declines, such as a method it does not implement, the completion record says so; for a call its caller withdrew before it started, the withdrawal is the second record). Arrival order vs. service order, which is the readable proof the queue works. A hang appears as an acceptance with no completion. The `Mcp-Param-*` header check on a 2026-07-28 tool call reads the tool list the proxy last served (`ListedToolSchemas`), so it adds no operation and no record. |
+| `INFO` | Two records per call — one on acceptance (client, op, queue depth), one on completion (queue wait, backend exec; for a call the backend declines, such as a method it does not implement, the completion record says so; for a call its caller withdrew before it started, the withdrawal is the second record). Arrival order vs. service order, which is the readable proof the queue works. A hang appears as an acceptance with no completion. The `Mcp-Param-*` header check on a 2026-07-28 tool call reads the tool list the proxy last served (`ListedToolSchemas`), so it adds no operation and no record. A tool call, resource read or prompt request is looked up in the listing last served for its surface, however old (see [Request lifecycle](#request-lifecycle-a-tool-call)), so it puts only itself on the queue; only a request made before any listing of its surface since the proxy started adds that listing, under its own client's tag. |
 | `DEBUG` | One extra record when a call actually starts running, which separates *waiting in the queue* from *at the backend, unanswered* — the two hangs that otherwise look identical. |
 
 Two structural points, both load-bearing:
