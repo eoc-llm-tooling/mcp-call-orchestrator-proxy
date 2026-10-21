@@ -2,7 +2,8 @@
 
 Both are answered by the proxy itself, under its own server identity and
 protocol version, then adjusted to present the backend as it is: the backend's
-``instructions`` are passed on, and a capability is advertised only when the
+``instructions`` are passed on, as the operator's overrides file changes them,
+and a capability is advertised only when the
 backend advertised it too, tools aside. The backend's values come
 from what it negotiated on its last successful connect (``BackendMetadata``),
 never from a call to the backend, so these requests never fail on the backend's
@@ -20,14 +21,20 @@ from typing import Any
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from mcp import types as mcp_types
 
+from mcp_call_orchestrator_proxy.overrides import TextOverride
 from mcp_call_orchestrator_proxy.resilient import BackendMetadata
 
 
 class BackendMetadataMiddleware(Middleware):
     """Applies the backend's negotiated metadata to the proxy's own answers."""
 
-    def __init__(self, metadata: Callable[[], BackendMetadata | None]) -> None:
+    def __init__(
+        self,
+        metadata: Callable[[], BackendMetadata | None],
+        instructions: TextOverride | None = None,
+    ) -> None:
         self._metadata = metadata
+        self._instructions = instructions
 
     async def on_initialize(
         self,
@@ -64,8 +71,12 @@ class BackendMetadataMiddleware(Middleware):
                 result.capabilities, backend.capabilities
             )
         }
-        if result.instructions is None and backend.instructions is not None:
-            update["instructions"] = backend.instructions
+        if result.instructions is None:
+            instructions = backend.instructions
+            if self._instructions is not None:
+                instructions = self._instructions.apply(instructions)
+            if instructions is not None:
+                update["instructions"] = instructions
         return result.model_copy(update=update)
 
 

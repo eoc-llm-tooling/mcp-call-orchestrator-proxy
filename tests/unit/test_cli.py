@@ -89,3 +89,32 @@ def test_run_keeps_an_update_check_the_operator_set(
 
     assert fastmcp.settings.check_for_updates == "prerelease"
     assert pypi_fetches == [True]
+
+
+def test_the_overrides_flag_sets_the_overrides_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "backend.json"
+    config.write_text('{"mcpServers": {"b": {"url": "http://127.0.0.1:1/mcp/"}}}')
+    seen: list[Any] = []
+
+    def _create(settings: Any) -> SimpleNamespace:
+        seen.append(settings.overrides)
+        return SimpleNamespace(mcp=SimpleNamespace(run=lambda **_kwargs: None))
+
+    monkeypatch.setattr(cli, "create_proxy_app", _create)
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "run",
+            "--transport",
+            "stdio",
+            "--backend-config",
+            str(config),
+            "--overrides",
+            "overrides.json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == ["overrides.json"]

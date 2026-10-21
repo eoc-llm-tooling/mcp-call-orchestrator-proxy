@@ -54,7 +54,10 @@ the proxy last served.
 
 Exposure control is two modules: `exposure.py` resolves the allow/deny settings and enforces
 them as FastMCP visibility on the server; `exposure_audit.py` is the pass-through layer above
-the queue that warns about filter names the backend does not have.
+the queue that warns about filter names the backend does not have. Description overrides are
+three modules: `overrides.py` loads and validates the operator's file; `descriptions.py`
+applies it as a transform on the `ProxyProvider` and to `prompts/get` results;
+`overrides_audit.py` checks its names when the backend first connects.
 
 `app.py::create_proxy_app` is the composition root that wires all of it and owns the
 lifespan. Every layer speaks the `MCPBackendClient` Protocol (`interfaces.py`), which is why
