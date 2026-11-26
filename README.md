@@ -43,6 +43,10 @@ server, unchanged except for the added stability.
   to the descriptions of the backend's tools, arguments, prompts and resources,
   and its server instructions. Names and schemas stay the backend's own. See
   [Description overrides](#description-overrides).
+- **OAuth 2.1 backends** — a remote HTTP backend that requires OAuth is signed in
+  to once, from a terminal, with `login`; the service then uses and refreshes the
+  stored tokens unattended, across restarts and reconnects, for every client. See
+  [OAuth 2.1 backends](#oauth-21-backends).
 
 ## Requirements
 
@@ -157,6 +161,14 @@ these instead. `MCP_PROXY_BACKEND_API_KEY` is required in this mode.
 | `MCP_PROXY_PROMPT_ALLOW` | *(unset)* | Comma-separated prompt names to expose (exact match). When set, `MCP_PROXY_PROMPT_DENY` is ignored. |
 | `MCP_PROXY_PROMPT_DENY` | *(unset)* | Comma-separated prompt names to hide. Ignored when allow is set. |
 | `MCP_PROXY_OVERRIDES` | *(unset)* | Path to a JSON file overriding the backend's descriptions and instructions. See [Description overrides](#description-overrides). |
+| `MCP_PROXY_OAUTH_TOKEN_DIR` | `$XDG_STATE_HOME/mcp-call-orchestrator-proxy/<server name>/oauth` | Directory of the stored OAuth tokens (`~/.local/state` when `XDG_STATE_HOME` is unset). See [OAuth 2.1 backends](#oauth-21-backends). |
+| `MCP_PROXY_OAUTH_CALLBACK_HOST` | `127.0.0.1` | Loopback address `login`'s callback listener binds to; part of the redirect URI. Only loopback addresses (`127.0.0.0/8`, `::1`, `localhost`) are accepted. |
+| `MCP_PROXY_OAUTH_CALLBACK_PORT` | `27126` | Port of `login`'s callback listener; part of the redirect URI. |
+| `MCP_PROXY_OAUTH_SCOPES` | *(unset)* | Scopes to request, comma- or space-separated. Unset: the scopes the backend's metadata names. |
+| `MCP_PROXY_OAUTH_CLIENT_NAME` | *(the server name)* | Client name sent with dynamic client registration. |
+| `MCP_PROXY_OAUTH_CLIENT_ID` | *(unset)* | A client registered in advance, for an authorization server without dynamic registration. |
+| `MCP_PROXY_OAUTH_CLIENT_SECRET` | *(unset)* | The secret of `MCP_PROXY_OAUTH_CLIENT_ID`, for a confidential client. Environment or `.env` only. |
+| `MCP_PROXY_OAUTH_ENCRYPTION_KEY_FILE` | *(unset)* | File holding a Fernet key; when set, the stored tokens are encrypted with it. |
 
 The most commonly tuned values are also available as CLI flags
 (`--host`, `--port`, `--transport`, `--backend-config`, `--overrides`, `--connect-timeout`,
@@ -297,6 +309,75 @@ Rules:
 - **Prompt results** carry the same description as the prompt's listing; the
   rest of every result is relayed as the backend sends it.
 
+### OAuth 2.1 backends
+
+A remote Streamable HTTP (or SSE) backend that requires OAuth 2.1 is configured
+with the standard `"auth": "oauth"` value in its entry:
+
+```json
+{
+  "mcpServers": {
+    "some-mcp-server": {
+      "url": "https://mcp.example.com/mcp",
+      "transport": "http",
+      "auth": "oauth"
+    }
+  }
+}
+```
+
+A person signs in once with `login` (see [Sign in to an OAuth
+backend](#sign-in-to-an-oauth-backend)); `run` then only uses and refreshes the
+stored tokens. It never opens a browser or listens for a callback: without a
+usable token, each connection attempt fails at once and `backend_status` reports
+
+```text
+OAuth sign-in required: run `mcp-call-orchestrator-proxy login` (<reason>)
+```
+
+in `last_error`, while the proxy stays connectable. `run` makes no request to the
+authorization server's metadata or registration endpoints, only to its token
+endpoint to refresh, at most once per connection attempt and once per request
+the backend refuses. A refresh token the authorization server rejected is not
+sent again by the same process.
+
+- **Token storage.** Tokens, the client registration and the authorization
+  server's metadata are stored as JSON files under `MCP_PROXY_OAUTH_TOKEN_DIR`,
+  one directory per instance (`MCP_PROXY_SERVER_NAME`), keyed inside by the
+  backend URL: a changed URL starts without tokens. The directory is created
+  `0700` and its files `0600`; the proxy refuses to start when the directory is
+  accessible by group or others, or belongs to another user. Each file is
+  written to a temporary file in the same directory and renamed, so a crash
+  leaves the previous tokens intact.
+- **One writer.** Many authorization servers rotate the refresh token on each
+  refresh, which invalidates the other copy. `run` holds an exclusive lock on
+  the token directory for as long as it runs; `login` and `logout` refuse while
+  it does, and a `run` started during a `login` exits with an error.
+- **Encryption at rest** (optional). With `MCP_PROXY_OAUTH_ENCRYPTION_KEY_FILE`
+  set, each stored value is encrypted with the Fernet key in that file. A key
+  file on the same disk protects the token directory copied on its own, not
+  against the same user, who can read the key as well. A key is generated with
+  `uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+  Under systemd the file can come from `LoadCredential=` (see
+  [`docs/deployment.md`](docs/deployment.md)).
+- **TLS.** The backend's and the authorization server's certificates are always
+  verified for an OAuth backend; `MCP_PROXY_BACKEND_VERIFY_TLS=false` is refused
+  at startup.
+- **Clients.** By default the proxy registers itself with the authorization
+  server (dynamic client registration) at the first `login`, with the redirect
+  URI `http://<callback host>:<callback port>/callback`; a fixed port keeps that
+  URI, and so the registration, the same across sign-ins. For a server without
+  dynamic registration, `MCP_PROXY_OAUTH_CLIENT_ID` (and, for a confidential
+  client, `MCP_PROXY_OAUTH_CLIENT_SECRET`) name a client registered in advance
+  with that redirect URI. The secret is read from the environment or `.env`,
+  never from the backend JSON; the stored client registration holds a copy.
+- **Secrets in output.** Tokens, authorization codes, PKCE verifiers and client
+  secrets appear in no log record at any level, no error message and no
+  `backend_status` field. The authorization URL `login` prints carries none of
+  them.
+
+The individual-variable route (Option 2) has no OAuth mode.
+
 ## Usage
 
 ### Run it manually
@@ -319,6 +400,29 @@ automatically once the backend appears (see `backend_status`).
 
 For `stdio` transport instead (e.g. for a client that spawns the process
 itself): `uv run mcp-call-orchestrator-proxy run --transport stdio`.
+
+### Sign in to an OAuth backend
+
+```bash
+export MCP_PROXY_BACKEND_CONFIG="/path/to/backend.json"   # the same settings as `run`
+uv run mcp-call-orchestrator-proxy login
+```
+
+`login` takes the settings `run` takes (environment, `.env`, `--backend-config`)
+and must see the same `MCP_PROXY_SERVER_NAME` and `MCP_PROXY_OAUTH_*` values as
+the service, so that it writes the token directory the service reads. It prints
+the authorization URL, tries to open it in a browser (`--no-browser` only
+prints it), and waits up to `--timeout` seconds (default 300) for the
+authorization server to redirect the browser to the callback listener on
+`MCP_PROXY_OAUTH_CALLBACK_HOST:MCP_PROXY_OAUTH_CALLBACK_PORT`. It then lists the
+backend's tools as a check and exits. Stored tokens that still work, or
+refresh, need no browser. When the authorization server no longer knows the
+stored client, `login` registers a new one.
+
+`logout` deletes the stored tokens, client registration and metadata for the
+configured backend. Both commands refuse while a proxy holds the token
+directory; [`docs/deployment.md`](docs/deployment.md) gives the order for a
+service.
 
 ### Check backend health
 

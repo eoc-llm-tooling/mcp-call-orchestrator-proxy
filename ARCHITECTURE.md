@@ -49,7 +49,9 @@ These are load-bearing; changing any of them changes the product.
   just the backoff retry loop — no polling.
 - **Secrets stay out of code and out of `ProxySettings`.** Tokens come from the environment,
   a `.env` file, or the backend JSON (whose auth lives inside the built transport, never in
-  the settings object), so a settings dump is safe to log.
+  the settings object), so a settings dump is safe to log. An OAuth client secret is a
+  `SecretStr` setting, masked in a dump; OAuth tokens live only in the token store and in the
+  provider.
 - **A stdio backend's subprocess is fully owned by the proxy.** Started on connect, kept
   across reconnects, killed on break or shutdown — never left behind. FastMCP's
   `StdioTransport` defaults to `keep_alive=True` (meant for reusing one subprocess across
@@ -113,12 +115,15 @@ the Protocol with what a connected client negotiated (capabilities, instructions
 
 | Module | Responsibility |
 |---|---|
-| [`cli.py`](src/mcp_call_orchestrator_proxy/cli.py) | Typer CLI (`run` subcommand). Maps flags to setting overrides, configures logging, turns off FastMCP's update check, then runs the app over stdio or Streamable HTTP. CLI flags win over env vars. |
+| [`cli.py`](src/mcp_call_orchestrator_proxy/cli.py) | Typer CLI (`run`, and `login` / `logout` for an OAuth backend). Maps flags to setting overrides, configures logging, turns off FastMCP's update check, then runs the app over stdio or Streamable HTTP. CLI flags win over env vars. |
 | [`config.py`](src/mcp_call_orchestrator_proxy/config.py) | `ProxySettings` (pydantic-settings, `MCP_PROXY_` prefix). Validates that a backend source is configured. |
 | [`config_extensions.py`](src/mcp_call_orchestrator_proxy/config_extensions.py) | FastMCP's extension keys in the backend entry, read at startup: `tools` translated into text overrides and exposure-control deny entries, every field it cannot apply refused with an error naming it and why; `include_tags` / `exclude_tags` refused. `combine_overrides` lets the overrides file win over the config's descriptions. |
 | [`overrides.py`](src/mcp_call_orchestrator_proxy/overrides.py) | The operator's overrides file: its schema (pydantic, unknown keys refused), `load_overrides` (read, validate, SHA-256 of the bytes) and the text operations `replace` / `prepend` / `append`. Pure apart from reading the file. |
 | [`descriptions.py`](src/mcp_call_orchestrator_proxy/descriptions.py) | `DescriptionOverrides` — a FastMCP transform on the `ProxyProvider` that hands on copies of the backend's items with the description texts the file names changed; `PromptResultDescriptions` — middleware that applies a prompt's override to its `prompts/get` result. Adds no backend call. |
 | [`overrides_audit.py`](src/mcp_call_orchestrator_proxy/overrides_audit.py) | `OverridesAudit` — a connect listener on `ResilientBackend`: when the backend first connects, it lists every surface the backend advertises through the queue, as the proxy's own calls, and warns once per overrides-file name the backend does not have. Runs again on the next connect only if a check did not complete. |
+| [`oauth.py`](src/mcp_call_orchestrator_proxy/oauth.py) | OAuth 2.1 for an HTTP backend whose entry says `"auth": "oauth"`: `resolve_oauth_backend` (settings, refusals), and two subclasses of FastMCP's `OAuth` over one store — `ServiceOAuth` for `run` (stored tokens and refresh only) and `LoginOAuth` for `login` (the interactive authorization-code flow). Both store the authorization server's metadata beside the tokens. |
+| [`oauth_store.py`](src/mcp_call_orchestrator_proxy/oauth_store.py) | The token directory: its location, `0700`/`0600` modes and the refusals, the exclusive lock file (`TokenDirLock`), and the JSON file-tree store, Fernet-encrypted when a key is given. |
+| [`oauth_login.py`](src/mcp_call_orchestrator_proxy/oauth_login.py) | The `login` and `logout` procedures the CLI runs. |
 | [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant at startup; builds the transport from the plain entry type whatever FastMCP extension keys the entry carries; forces `keep_alive=False` on a stdio transport; gives the client a session that relays tool results without checking them against their output schema (`RelayClientSession`); gives a streamable-HTTP backend's client a read timeout longer than the call timeout; resolves a human-readable backend URL. |
 | [`interfaces.py`](src/mcp_call_orchestrator_proxy/interfaces.py) | `MCPBackendClient` Protocol — the structural contract every layer implements — and `NegotiatedBackendClient`, which adds what a connected client negotiated. |
 | [`resilient.py`](src/mcp_call_orchestrator_proxy/resilient.py) | `ResilientBackend` — owns the one live connection and a background supervisor that keeps it healthy across backend restarts. Sits *below* the orchestrator, so it never adds concurrency. Records what the backend negotiated (`BackendMetadata`) on each connect, and starts each connect listener as a task beside the held connection. Sources `backend_status`. |
@@ -362,7 +367,53 @@ source and optional; unset, every text is the backend's own. See
 [Description overrides](#description-overrides).
 
 TLS verification (`backend_verify_tls`, default `false`) is a separate knob in both modes,
-because the standard `mcpServers` format has no verify field.
+because the standard `mcpServers` format has no verify field. An OAuth backend always verifies;
+`backend_verify_tls=false` set for one is refused at startup.
+
+## OAuth backends
+
+An HTTP/SSE entry with `"auth": "oauth"` turns OAuth 2.1 on (`oauth.py`); bearer strings, no
+auth and stdio entries are unaffected. FastMCP would build a default `OAuth(url)` from the
+string, with tokens in memory, a random callback port and an interactive flow; the proxy builds
+its own provider instead and hands it to the transport (`client.py::_single_server_transport`).
+
+- **One provider per process.** `create_proxy_app` resolves the OAuth settings, prepares the
+  token directory (`oauth_store.py`) and builds one `ServiceOAuth`. The real backend factory
+  calls its `reload()` and passes it to every client `ResilientBackend` builds, so each
+  connection attempt re-reads the store and a reconnect never needs a new sign-in. The queue,
+  session termination and resilience layers are unchanged (OCP-C-012): a sign-in failure is a
+  failed connection attempt like any other.
+- **`run` is never interactive.** `ServiceOAuth` replaces the MCP SDK's flow with one that
+  attaches the stored access token, refreshes it when expired or refused (at most once per
+  request), and otherwise raises `SignInRequiredError`, a `RuntimeError` whose message becomes
+  `backend_status.last_error`. It performs no discovery and no registration, opens no browser and
+  starts no callback listener, so the reconnect backoff reaches only the token endpoint. A refresh
+  token the authorization server rejected is remembered by fingerprint and not sent again by the
+  process. The SDK's flow holds the provider's lock across the authenticated request, which would
+  serialize calls the queue lets run concurrently; `ServiceOAuth` holds it only while preparing a
+  token.
+- **`login` is the only interactive path.** `LoginOAuth` runs the SDK's authorization-code flow
+  with PKCE and dynamic registration (or a pre-registered client), on the configured loopback
+  callback host and port. Before the browser opens, it checks the authorization URL as FastMCP
+  does: an HTTP 400 means the stored client is unknown, and FastMCP's flow clears the stored
+  registration and registers again. httpcore's DEBUG trace logs response headers, and a server
+  that approves at once puts the code in `Location`, so that check runs with the trace off.
+- **Stored discovery.** The SDK keeps the authorization server's metadata in memory only; after a
+  restart its refresh would go to `/token` on the backend's origin. The providers store the
+  protected-resource and authorization-server metadata beside the tokens after each
+  authorization, and restore them on load.
+- **The store.** One directory per instance (`server_name`), keyed inside by the backend URL
+  (FastMCP's `TokenStorageAdapter` uses the URL as the key prefix, and the metadata follows the
+  same key). It is created `0700` and refused when group or others can reach it or another user
+  owns it. FastMCP's `filetree` store writes each value as JSON through `mkstemp` (`0600`),
+  `fsync` and `rename`; its collection directories are made with the umask and tightened to
+  `0700`. The `disk` store is not used: it serializes with pickle. An optional Fernet key wraps
+  the store with `FernetEncryptionWrapper`.
+- **One writer.** Many authorization servers rotate the refresh token on each refresh, so two
+  processes refreshing from one copy invalidate each other. `TokenDirLock` is an exclusive,
+  non-blocking `flock` on the directory's lock file: the lifespan holds it for the life of `run`,
+  and `login` / `logout` hold it while they work; whichever comes second is refused, with the
+  holder's role and pid in the message.
 
 A stdio backend's environment is the `mcp` SDK's own doing, not this proxy's: `mcp.client.stdio`
 merges a small safe allowlist (`PATH`, `HOME`, etc. — never the full parent environment) with

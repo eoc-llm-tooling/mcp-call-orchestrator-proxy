@@ -168,3 +168,35 @@ def test_the_default_level_shows_the_queue_working() -> None:
     that it is doing its job, and are worthless if they are off by default.
     """
     assert ProxySettings(backend_api_key="a" * 32).log_level == "INFO"
+
+
+@pytest.mark.parametrize(
+    "host", ["127.0.0.1", "127.0.0.2", "::1", "[::1]", "localhost"]
+)
+def test_oauth_callback_host_accepts_loopback(host: str) -> None:
+    settings = ProxySettings(backend_api_key="k", oauth_callback_host=host)
+    assert settings.oauth_callback_host == host.strip("[]")
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.0.2.10", "example.com", ""])
+def test_oauth_callback_host_refuses_anything_else(host: str) -> None:
+    with pytest.raises(ValidationError, match="loopback address"):
+        ProxySettings(backend_api_key="k", oauth_callback_host=host)
+
+
+def test_oauth_scopes_split_on_commas_and_spaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCP_PROXY_OAUTH_SCOPES", "read,write  read offline_access")
+    settings = ProxySettings(backend_api_key="k")
+    assert settings.oauth_scopes == ("read", "write", "offline_access")
+    monkeypatch.setenv("MCP_PROXY_OAUTH_SCOPES", " ")
+    assert ProxySettings(backend_api_key="k").oauth_scopes is None
+
+
+def test_oauth_client_secret_is_masked(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCP_PROXY_OAUTH_CLIENT_SECRET", "the-client-secret")
+    settings = ProxySettings(backend_api_key="k")
+    assert "the-client-secret" not in repr(settings)
+    assert settings.oauth_client_secret is not None
+    assert settings.oauth_client_secret.get_secret_value() == "the-client-secret"

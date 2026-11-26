@@ -118,3 +118,26 @@ def test_the_overrides_flag_sets_the_overrides_file(
 
     assert result.exit_code == 0, result.output
     assert seen == ["overrides.json"]
+
+
+def test_login_refuses_a_backend_without_oauth(tmp_path: Path) -> None:
+    config = tmp_path / "backend.json"
+    config.write_text('{"mcpServers": {"b": {"url": "http://127.0.0.1:1/mcp/"}}}')
+    result = CliRunner().invoke(cli.app, ["login", "--backend-config", str(config)])
+    assert result.exit_code == 1
+    assert "nothing to sign in to" in result.output
+
+
+def test_logout_removes_the_stored_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "backend.json"
+    config.write_text(
+        '{"mcpServers": {"b": {"url": "https://mcp.example.com/mcp", "auth": "oauth"}}}'
+    )
+    monkeypatch.setenv("MCP_PROXY_OAUTH_TOKEN_DIR", str(tmp_path / "tokens"))
+    result = CliRunner().invoke(cli.app, ["logout", "--backend-config", str(config)])
+    assert result.exit_code == 0, result.output
+    assert "Removed the stored OAuth tokens for https://mcp.example.com/mcp" in (
+        result.output
+    )

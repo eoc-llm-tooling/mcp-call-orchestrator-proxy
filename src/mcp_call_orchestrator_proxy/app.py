@@ -5,13 +5,16 @@ FastMCP proxy server together, and defines the lifespan hook that opens
 the one real backend connection and starts the orchestrator's dispatcher
 for the lifetime of the process. FastMCP wraps both stdio and HTTP
 transports with the same lifespan manager, so this one hook covers both.
+
+For an OAuth backend it builds the one ``ServiceOAuth`` provider of the
+process, and the lifespan holds the token directory's lock throughout.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,6 +37,12 @@ from mcp_call_orchestrator_proxy.exposure import (
 )
 from mcp_call_orchestrator_proxy.exposure_audit import ExposureAuditBackend
 from mcp_call_orchestrator_proxy.interfaces import NegotiatedBackendClient
+from mcp_call_orchestrator_proxy.oauth import (
+    ServiceOAuth,
+    open_backend_store,
+    resolve_oauth_backend,
+)
+from mcp_call_orchestrator_proxy.oauth_store import TokenDirLock
 from mcp_call_orchestrator_proxy.orchestrator import CallOrchestrator
 from mcp_call_orchestrator_proxy.overrides import Overrides, load_overrides
 from mcp_call_orchestrator_proxy.overrides_audit import OverridesAudit
@@ -68,7 +77,10 @@ def create_proxy_app(
     entry carries a FastMCP key this proxy does not apply
     (`read_config_extensions`). Reads the overrides file,
     when one is set, and raises ``ValueError`` if it is not valid
-    (`load_overrides`).
+    (`load_overrides`). For a backend entry with ``"auth": "oauth"`` it creates
+    the token directory when missing, and raises ``ValueError`` for OAuth
+    settings or a token directory it cannot use (`resolve_oauth_backend`,
+    `open_backend_store`).
 
     The real backend connection is wrapped in a `ResilientBackend` so the
     proxy survives the backend being absent at startup and coming and going
@@ -105,6 +117,7 @@ def create_proxy_app(
         logger.info("backend config: tools key applied: %s", extensions.summary())
 
     resolved_factory: Callable[[], NegotiatedBackendClient]
+    token_lock: TokenDirLock | None = None
     if backend_factory is not None:
         resolved_factory = backend_factory
     elif backend_client is not None:
@@ -114,6 +127,16 @@ def create_proxy_app(
             return injected
 
         resolved_factory = _reuse_factory
+    elif (oauth := resolve_oauth_backend(settings)) is not None:
+        token_dir, store = open_backend_store(oauth)
+        token_lock = TokenDirLock(token_dir, role="run")
+        provider = ServiceOAuth(oauth, store)
+
+        def _oauth_factory() -> NegotiatedBackendClient:
+            provider.reload()
+            return build_real_backend_client(settings, auth=provider)
+
+        resolved_factory = _oauth_factory
     else:
 
         def _real_factory() -> NegotiatedBackendClient:
@@ -164,16 +187,19 @@ def create_proxy_app(
 
     @asynccontextmanager
     async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
-        # `async with resilient` starts the reconnect supervisor; it does not
-        # block on a down backend, so the proxy starts cleanly regardless.
-        async with resilient:
-            await orchestrator.start()
-            try:
-                yield
-            finally:
-                # Stop the orchestrator first (no new calls reach the backend),
-                # then tear down the supervisor + live connection.
-                await orchestrator.stop()
+        with ExitStack() as held:
+            if token_lock is not None:
+                held.enter_context(token_lock)
+            # `async with resilient` starts the reconnect supervisor; it does not
+            # block on a down backend, so the proxy starts cleanly regardless.
+            async with resilient:
+                await orchestrator.start()
+                try:
+                    yield
+                finally:
+                    # Stop the orchestrator first (no new calls reach the
+                    # backend), then tear down the supervisor + live connection.
+                    await orchestrator.stop()
 
     mcp = build_proxy_server(
         lambda: audit_backend,

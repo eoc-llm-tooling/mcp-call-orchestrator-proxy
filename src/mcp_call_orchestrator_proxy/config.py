@@ -3,12 +3,15 @@
 Follows modern Python practices and keeps configuration isolated (SRP).
 """
 
+import ipaddress
 from typing import Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+
+DEFAULT_OAUTH_CALLBACK_PORT = 27126
 
 
 class ProxySettings(BaseSettings):
@@ -122,6 +125,51 @@ class ProxySettings(BaseSettings):
         gt=0,
     )
 
+    # OAuth 2.1 for an HTTP backend whose config entry says `"auth": "oauth"`
+    # (oauth.py). Ignored for any other backend.
+    oauth_token_dir: str | None = Field(
+        default=None,
+        description="Directory holding the backend's OAuth tokens and client "
+        "registration. Unset: $XDG_STATE_HOME (or ~/.local/state)/"
+        "mcp-call-orchestrator-proxy/<server_name>/oauth.",
+    )
+    oauth_callback_host: str = Field(
+        default="127.0.0.1",
+        description="Loopback address the `login` command's OAuth callback "
+        "listener binds to; part of the redirect URI.",
+    )
+    oauth_callback_port: int = Field(
+        default=DEFAULT_OAUTH_CALLBACK_PORT,
+        description="Port of the `login` command's OAuth callback listener; part "
+        "of the redirect URI, so it must stay the same across sign-ins.",
+        ge=1,
+        le=65535,
+    )
+    oauth_scopes: tuple[str, ...] | None = Field(
+        default=None,
+        description="Scopes to request, comma- or space-separated. Unset: the "
+        "scopes the backend's metadata names.",
+    )
+    oauth_client_name: str | None = Field(
+        default=None,
+        description="Client name sent with dynamic client registration. Unset: "
+        "server_name.",
+    )
+    oauth_client_id: str | None = Field(
+        default=None,
+        description="A client ID registered with the authorization server in "
+        "advance, for a server that does not allow dynamic registration.",
+    )
+    oauth_client_secret: SecretStr | None = Field(
+        default=None,
+        description="The secret of oauth_client_id, for a confidential client.",
+    )
+    oauth_encryption_key_file: str | None = Field(
+        default=None,
+        description="File holding a Fernet key; when set, the stored tokens are "
+        "encrypted with it.",
+    )
+
     # Observability
     log_level: LogLevel = Field(
         default="INFO",
@@ -215,6 +263,40 @@ class ProxySettings(BaseSettings):
         # Preserve first-seen order; drop blanks and duplicates.
         names = tuple(dict.fromkeys(p for p in parts if p))
         return names or None
+
+    @field_validator("oauth_scopes", mode="before")
+    @classmethod
+    def _parse_scopes(cls, value: Any) -> Any:
+        """Split on commas and whitespace alike; OAuth scope lists use spaces.
+
+        Blank → unset (None), as for the name lists.
+        """
+        if isinstance(value, str):
+            scopes = tuple(dict.fromkeys(value.replace(",", " ").split()))
+            return scopes or None
+        return value
+
+    @field_validator("oauth_callback_host")
+    @classmethod
+    def _require_loopback(cls, value: str) -> str:
+        """Accept only a loopback address, so the callback is never reachable
+        from another host. ``localhost`` is loopback by definition (RFC 6761).
+        """
+        host = value.strip()
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+        if host == "localhost":
+            return host
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            raise ValueError(
+                f"oauth_callback_host must be a loopback address such as "
+                f"127.0.0.1 or ::1, not {value!r}"
+            )
+        return host
 
     @model_validator(mode="after")
     def _require_a_backend_source(self) -> "ProxySettings":

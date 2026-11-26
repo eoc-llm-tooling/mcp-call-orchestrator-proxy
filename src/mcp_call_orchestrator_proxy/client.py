@@ -21,6 +21,10 @@ applies, so the transport is always built from the plain entry type. Of those
 keys, `tools` is honoured in part and the two tag keys are refused, both at
 startup (`config_extensions.py`).
 
+An entry with ``"auth": "oauth"`` is connected with the OAuth provider the
+proxy builds (``oauth.py``), never with the default one FastMCP would make
+from the string, and always verifies TLS.
+
 The client relays tool results without checking them against the tool's
 declared output schema (`RelayClientSession`); the proxy's own clients check
 what they receive.
@@ -34,6 +38,7 @@ from typing import Any
 
 import httpx2
 from fastmcp import Client
+from fastmcp.client.auth.oauth import OAuth
 from fastmcp.client.transports import (
     ClientTransport,
     SSETransport,
@@ -71,8 +76,19 @@ class RelayClientSession(ClientSession):
 _RELAY_OPTIONS = TransportOptions(session_class=RelayClientSession)
 
 
-def build_real_backend_client(settings: ProxySettings) -> Client[Any]:
+def build_real_backend_client(
+    settings: ProxySettings,
+    *,
+    auth: OAuth | None = None,
+    init_timeout: float | None = None,
+) -> Client[Any]:
     """Build a fastmcp Client for the configured backend.
+
+    `auth` is the OAuth provider for a config entry with ``"auth": "oauth"``,
+    which such an entry requires; it turns TLS verification on whatever
+    `backend_verify_tls` says. `init_timeout` replaces
+    `connect_timeout_seconds` as the connect/initialize bound, for `login`,
+    whose first request waits for a person to sign in.
 
     A plain string `auth` is auto-wrapped as Bearer auth by fastmcp;
     `verify=False` disables TLS verification for a self-signed cert.
@@ -86,16 +102,17 @@ def build_real_backend_client(settings: ProxySettings) -> Client[Any]:
     schema (`RelayClientSession`).
     """
     request_timeout = settings.call_timeout_seconds + _BACKSTOP_GRACE_SECONDS
+    verify = True if auth is not None else settings.backend_verify_tls
     client: Client[Any]
     if settings.backend_config:
-        transport = _single_server_transport(settings.backend_config)
+        transport = _single_server_transport(settings.backend_config, auth=auth)
         kwargs: dict[str, Any] = {
             "timeout": request_timeout,
-            "init_timeout": settings.connect_timeout_seconds,
+            "init_timeout": init_timeout or settings.connect_timeout_seconds,
         }
         # `verify` only applies to HTTP transports; a stdio backend has no TLS.
         if isinstance(transport, StreamableHttpTransport | SSETransport):
-            kwargs["verify"] = settings.backend_verify_tls
+            kwargs["verify"] = verify
         client = Client(transport, **kwargs)
     else:
         client = Client(
@@ -107,7 +124,7 @@ def build_real_backend_client(settings: ProxySettings) -> Client[Any]:
         )
     if isinstance(client.transport, StreamableHttpTransport):
         client.transport.httpx_client_factory = _http_client_factory(
-            verify=settings.backend_verify_tls,
+            verify=verify,
             read_timeout=request_timeout,
         )
     # `Client` takes its session class only from these options, and has no
@@ -153,16 +170,26 @@ def _http_client_factory(
     return factory
 
 
-def _single_server_transport(config_path: str) -> ClientTransport:
+def _single_server_transport(
+    config_path: str, *, auth: OAuth | None = None
+) -> ClientTransport:
     """Load a standard mcpServers JSON file and return its single transport.
 
     This proxy fronts exactly one backend, so a config that defines more than
     one server is rejected: FastMCP would otherwise mount them as a composite
     and prefix every tool name (`{server}_{tool}`), breaking exact parity.
+    An entry with ``"auth": "oauth"`` gets `auth` in place of the string.
     """
     config = MCPConfig.from_file(Path(config_path))
     _require_single_server(config, config_path)
     server = next(iter(config.mcpServers.values()))
+    if isinstance(server, RemoteMCPServer) and server.auth == "oauth":
+        if auth is None:
+            raise ValueError(
+                f"Backend config {config_path!r} uses OAuth; its client needs the "
+                "proxy's OAuth provider."
+            )
+        server = server.model_copy(update={"auth": auth})
     # The plain type's `to_transport`, never a transforming subclass's override:
     # that one returns a nested proxy, which the settings below cannot reach.
     transport: ClientTransport

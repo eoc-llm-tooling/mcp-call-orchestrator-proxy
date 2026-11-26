@@ -155,6 +155,22 @@ the backend side, completes discovery and a tool call through the proxy.
 
 **Priority.** must · **Status.** agreed
 
+### OCP-N-021 — An OAuth-protected HTTP backend runs unattended
+
+**Statement.** Where an HTTP backend requires OAuth 2.1, the proxy shall let a person sign in
+once from a terminal, and shall then reach the backend with the stored tokens, refreshing them,
+across restarts and reconnects and for every client, without starting an interactive sign-in of
+its own.
+
+**Rationale.** Hosted MCP servers require OAuth, and a service has no person at hand: a sign-in
+it starts by itself waits for no one, and tokens held only in memory are lost on each restart.
+
+**Acceptance.** After one sign-in, the proxy started as a service connects, survives a forced
+reconnect and an expired access token without a browser or callback listener, and, with no
+usable token, reports that a sign-in is required in `backend_status`.
+
+**Priority.** should · **Status.** proposed
+
 ## Exposure and guidance
 
 ### OCP-N-011 — The operator controls what clients can see and use

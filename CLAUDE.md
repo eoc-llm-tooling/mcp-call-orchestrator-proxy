@@ -119,6 +119,9 @@ it before adding a test rather than copying the nearest existing one.
   exposure filter, a call the backend never answered). Log a degradation the proxy absorbs by
   design below `WARNING`.
 - **Break detection is network-silent** — no timed pings against the backend. Don't add a health-check ping.
+- **`run` never signs in.** `ServiceOAuth` (`oauth.py`) only uses and refreshes stored tokens;
+  don't give it discovery, registration, a browser or a callback listener, and don't swap it for
+  the SDK's flow — that belongs to `LoginOAuth` and the `login` command.
 - **Stdio backends force `keep_alive=False`** unconditionally in `client.py::_single_server_transport`,
   regardless of what the config JSON says. Don't "simplify" that away — it's what stops a stdio
   backend's subprocess from being orphaned across reconnects and on shutdown.

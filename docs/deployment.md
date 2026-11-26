@@ -101,6 +101,88 @@ changed — the tradeoff is that specifiers like `%h` aren't expanded inside the
 file's content, so any paths in it must be written out in full. See the
 comments in the `.env.example` for details.
 
+## An OAuth backend as a service
+
+A backend whose entry says `"auth": "oauth"` (see the README's
+[OAuth 2.1 backends](../README.md#oauth-21-backends)) needs one interactive
+sign-in before the service can use it. The service never signs in itself: until
+tokens are stored, it runs, stays connectable, and reports
+`OAuth sign-in required` in `backend_status` and once, at `WARNING`, in the
+journal.
+
+The unit template sets `MCP_PROXY_BACKEND_VERIFY_TLS=false`; remove that line
+for an OAuth backend, whose certificates are always verified and which refuses
+the setting.
+
+### Sign in
+
+`run` holds the token directory's lock while it runs, so the order is stop the
+unit, sign in, start the unit:
+
+```bash
+systemctl --user stop mcp-call-orchestrator-proxy.service
+env $(systemctl --user show -p Environment --value mcp-call-orchestrator-proxy.service) \
+   .venv/bin/mcp-call-orchestrator-proxy login
+systemctl --user start mcp-call-orchestrator-proxy.service
+```
+
+`login` must see the service's settings, above all `MCP_PROXY_BACKEND_CONFIG`,
+`MCP_PROXY_SERVER_NAME` and any `MCP_PROXY_OAUTH_*`, or it writes tokens the
+service does not read. The `systemctl show` line passes the unit's
+`Environment=` lines, which holds while no value contains a space. With the
+env-file unit, load that file instead:
+
+```bash
+set -a; . ~/.config/mcp-call-orchestrator-proxy/mcp-call-orchestrator-proxy.env; set +a
+.venv/bin/mcp-call-orchestrator-proxy login
+```
+
+`login` started while the unit runs exits with an error naming the running
+proxy's pid, and changes nothing.
+
+### Sign in again
+
+Refresh tokens expire, or are revoked, on the authorization server's terms. The
+service then reports `OAuth sign-in required: run
+\`mcp-call-orchestrator-proxy login\` (the authorization server rejected the
+stored refresh token …)`, and the same stop, `login`, start sequence restores
+it. `logout` between stop and `login` discards the stored registration as well,
+for a sign-in from scratch.
+
+### The callback port and the browser
+
+The authorization server sends the browser back to
+`http://127.0.0.1:27126/callback` (the configured callback host and port), so
+the browser must reach that port on the machine where `login` runs. On a
+desktop that is the same machine. On a headless host, forward the port from the
+machine with the browser and print the URL instead of opening one:
+
+```bash
+ssh -L 27126:127.0.0.1:27126 user@service-host
+# on service-host, with the service's settings as above:
+.venv/bin/mcp-call-orchestrator-proxy login --no-browser
+```
+
+and open the printed URL in the local browser. The callback listener runs only
+while `login` waits, and binds the loopback address alone.
+
+### An encryption key from systemd credentials
+
+With `MCP_PROXY_OAUTH_ENCRYPTION_KEY_FILE` the stored tokens are encrypted. Where
+the systemd version supports credentials for user units, the key can reach the
+service as a credential rather than a path in its environment:
+
+```ini
+LoadCredential=oauth-key:%h/.config/mcp-call-orchestrator-proxy/oauth.key
+Environment=MCP_PROXY_OAUTH_ENCRYPTION_KEY_FILE=%d/oauth-key
+```
+
+`login` reads the same key from its source path
+(`MCP_PROXY_OAUTH_ENCRYPTION_KEY_FILE=$HOME/.config/mcp-call-orchestrator-proxy/oauth.key`).
+The key file is as private as the tokens (`chmod 600`); kept on the same disk,
+it protects a copy of the token directory alone, not the tokens from the same
+user.
+
 ## supervisord user instance
 
 A per-user `supervisord` plays the role of `systemd --user`: it runs as the
