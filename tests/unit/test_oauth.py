@@ -480,3 +480,77 @@ async def test_unreadable_stored_metadata_is_reported_as_such(tmp_path: Path) ->
     )
     with pytest.raises(TokenStoreUnreadableError, match="ValidationError"):
         await _send(ServiceOAuth(_backend(tmp_path), store), FakeServers())
+
+
+async def test_an_unusable_200_never_replays_the_spent_refresh_token(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await _seed(store, expired=True)
+    servers = FakeServers()
+
+    async def _garbled(request: httpx2.Request) -> httpx2.Response:
+        servers.requests.append(request)
+        if str(request.url) == TOKEN_ENDPOINT:
+            return httpx2.Response(200, content=b"not a token")
+        return httpx2.Response(200)
+
+    provider = ServiceOAuth(_backend(tmp_path), store)
+    transport = httpx2.MockTransport(_garbled)
+    for _attempt in range(2):
+        provider.reload()
+        async with httpx2.AsyncClient(transport=transport, auth=provider) as http:
+            with pytest.raises(SignInRequiredError):
+                await http.post(URL, json={})
+    # The store still holds refresh-1, but it is not sent a second time.
+    assert await _stored_refresh(store) == "refresh-1"
+    assert len(servers.token_requests()) == 1
+
+
+async def test_refreshed_tokens_that_cannot_be_stored_are_kept_in_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = _store(tmp_path)
+    await _seed(store, expired=True)
+    servers = FakeServers()
+    provider = ServiceOAuth(_backend(tmp_path), store)
+
+    async def _disk_full(tokens: OAuthToken) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(provider.token_storage_adapter, "set_tokens", _disk_full)
+    assert (await _send(provider, servers)).status_code == 200
+    assert "could not be stored" in caplog.text
+    assert "refresh-2" not in caplog.text
+    monkeypatch.undo()
+
+    # A reconnect does not roll back to the spent refresh-1 on disk.
+    provider.reload()
+    assert (await _send(provider, servers)).status_code == 200
+    assert len(servers.token_requests()) == 1
+    assert await _stored_refresh(store) == "refresh-1"
+
+
+async def test_an_access_token_refused_after_a_refresh_is_not_sent_again(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    await _seed(store)
+    servers = FakeServers()
+    servers.accepted = set()
+
+    async def _refuse_everything(request: httpx2.Request) -> httpx2.Response:
+        response = await servers(request)
+        servers.accepted = set()
+        return response
+
+    provider = ServiceOAuth(_backend(tmp_path), store)
+    transport = httpx2.MockTransport(_refuse_everything)
+    for _attempt in range(3):
+        provider.reload()
+        async with httpx2.AsyncClient(transport=transport, auth=provider) as http:
+            with pytest.raises(SignInRequiredError, match="rejected a refreshed"):
+                await http.post(URL, json={})
+    assert len(servers.token_requests()) == 1
+    # Two backend requests (access-1, then its successor) and one refresh.
+    assert len(servers.requests) == 3

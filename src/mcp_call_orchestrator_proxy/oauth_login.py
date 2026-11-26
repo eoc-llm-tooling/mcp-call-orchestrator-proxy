@@ -40,9 +40,12 @@ def _check_callback_port(backend: OAuthBackend) -> None:
     """Refuse at once when the callback port is taken.
 
     uvicorn, which serves the callback, exits the process on a failed bind.
+    The probe binds as uvicorn does, with ``SO_REUSEADDR``, so a port left in
+    ``TIME_WAIT`` by an earlier ``login`` passes and a listening one does not.
     """
     family = socket.AF_INET6 if ":" in backend.callback_host else socket.AF_INET
     with socket.socket(family, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind((backend.callback_host, backend.callback_port))
         except OSError as exc:

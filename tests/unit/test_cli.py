@@ -141,3 +141,48 @@ def test_logout_removes_the_stored_tokens(
     assert "Removed the stored OAuth tokens for https://mcp.example.com/mcp" in (
         result.output
     )
+
+
+def _oauth_backend_on(port: int) -> Any:
+    from mcp_call_orchestrator_proxy.oauth import OAuthBackend
+
+    return OAuthBackend(
+        url="https://mcp.example.com/mcp",
+        token_dir=Path("unused"),
+        callback_host="127.0.0.1",
+        callback_port=port,
+        client_name="test",
+    )
+
+
+def test_a_callback_port_in_time_wait_can_be_used_again() -> None:
+    import socket
+
+    from mcp_call_orchestrator_proxy.oauth_login import _check_callback_port
+
+    with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        client = socket.create_connection(("127.0.0.1", port))
+        accepted, _ = listener.accept()
+        # The listener's side closes first, as the callback server does, so
+        # its port is left in TIME_WAIT.
+        accepted.close()
+        client.close()
+    _check_callback_port(_oauth_backend_on(port))
+
+
+def test_a_callback_port_another_listener_holds_is_refused() -> None:
+    import socket
+
+    from mcp_call_orchestrator_proxy.oauth_login import _check_callback_port
+
+    with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        with pytest.raises(RuntimeError, match="cannot be used"):
+            _check_callback_port(_oauth_backend_on(port))

@@ -28,7 +28,7 @@ import webbrowser
 from collections.abc import AsyncGenerator, Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import override
+from typing import NoReturn, override
 
 import httpx2
 from fastmcp.client.auth.oauth import ClientNotFoundError, OAuth
@@ -52,6 +52,8 @@ from mcp_call_orchestrator_proxy.oauth_store import (
 )
 
 _DISCOVERY_COLLECTION = "mcp-proxy-oauth-discovery"
+logger = logging.getLogger(__name__)
+
 _LOGIN_COMMAND = "mcp-call-orchestrator-proxy login"
 _AUTHORIZE_OK = frozenset({200, 302, 303, 307, 308})
 
@@ -262,15 +264,32 @@ class ServiceOAuth(_StoredOAuth):
 
     Unlike the MCP SDK's flow, it holds the provider's lock only while it
     prepares a token, not while the request itself runs, so it does not
-    serialize calls the queue lets run concurrently. A refresh token the
-    authorization server rejected is never sent again by this process; only a
-    new ``login`` replaces it, and ``login`` cannot run while ``run`` holds the
-    token directory. Each request makes at most one refresh.
+    serialize calls the queue lets run concurrently. Each request makes at
+    most one refresh. ``login`` cannot run while ``run`` holds the token
+    directory, so only a restart after a new ``login`` brings tokens this
+    process has not seen; until then it never sends again:
+
+    - a refresh token the authorization server rejected, or one it answered
+      with HTTP 200 that could not be used: the server has probably rotated
+      it, and many servers revoke the whole grant when a rotated token is
+      reused;
+    - an access token the backend refused right after a refresh.
+
+    When refreshed tokens cannot be stored, they are kept in memory and
+    ``reload`` keeps them until a later refresh stores its successors: the
+    store holds only the spent refresh token.
     """
 
     def __init__(self, backend: OAuthBackend, store: AsyncKeyValue) -> None:
         super().__init__(backend, store)
         self._rejected: set[str] = set()
+        self._refused: set[str] = set()
+        self._unsaved = False
+
+    @override
+    def reload(self) -> None:
+        if not self._unsaved:
+            super().reload()
 
     @override
     async def redirect_handler(self, authorization_url: str) -> None:
@@ -291,6 +310,10 @@ class ServiceOAuth(_StoredOAuth):
             context.protocol_version = request.headers.get(MCP_PROTOCOL_VERSION_HEADER)
             if context.current_tokens is None or context.client_info is None:
                 raise SignInRequiredError("no tokens are stored for this backend")
+            if _fingerprint(context.current_tokens.access_token) in self._refused:
+                raise SignInRequiredError(
+                    "the backend rejected a refreshed access token"
+                )
             refreshed = not context.is_token_valid()
             if refreshed:
                 refresh = await self._refresh_request("the stored access token expired")
@@ -300,7 +323,7 @@ class ServiceOAuth(_StoredOAuth):
         if response.status_code != 401:
             return
         if refreshed:
-            raise SignInRequiredError("the backend rejected a refreshed access token")
+            self._refuse(sent)
         async with context.lock:
             # Another request may have refreshed while this one was out.
             if self._access_token() == sent:
@@ -308,22 +331,30 @@ class ServiceOAuth(_StoredOAuth):
                     "the backend rejected the stored access token"
                 )
                 await self._accept_refresh((yield refresh))
-            self._authorize(request)
+            sent = self._authorize(request)
         response = yield request
         if response.status_code == 401:
-            raise SignInRequiredError("the backend rejected a refreshed access token")
+            self._refuse(sent)
+
+    def _refuse(self, access_token: str | None) -> NoReturn:
+        if access_token is not None:
+            self._refused.add(_fingerprint(access_token))
+        raise SignInRequiredError("the backend rejected a refreshed access token")
 
     def _access_token(self) -> str | None:
         tokens = self.context.current_tokens
         return tokens.access_token if tokens is not None else None
+
+    def _refresh_token_value(self) -> str | None:
+        tokens = self.context.current_tokens
+        return tokens.refresh_token if tokens is not None else None
 
     def _authorize(self, request: httpx2.Request) -> str | None:
         self._add_auth_header(request)
         return self._access_token()
 
     async def _refresh_request(self, reason: str) -> httpx2.Request:
-        tokens = self.context.current_tokens
-        refresh_token = tokens.refresh_token if tokens is not None else None
+        refresh_token = self._refresh_token_value()
         if not refresh_token or self.context.client_info is None:
             raise SignInRequiredError(f"{reason} and no refresh token is stored")
         if _fingerprint(refresh_token) in self._rejected:
@@ -333,18 +364,39 @@ class ServiceOAuth(_StoredOAuth):
         return await self._refresh_token()
 
     async def _accept_refresh(self, response: httpx2.Response) -> None:
+        sent = self._refresh_token_value()
+        spent = _fingerprint(sent) if sent else None
         status = response.status_code
         if status == 200:
-            if await self._handle_refresh_response(response):
+            try:
+                accepted = await self._handle_refresh_response(response)
+            except Exception as exc:
+                if spent is not None:
+                    self._rejected.add(spent)
+                renewed = self._refresh_token_value()
+                if renewed is None or _fingerprint(renewed) == spent:
+                    raise
+                # The SDK holds the new tokens before it stores them.
+                self._unsaved = True
+                logger.warning(
+                    "oauth: the refreshed tokens could not be stored (%s: %s); "
+                    "they are kept in memory until a later refresh stores them",
+                    type(exc).__name__,
+                    exc,
+                )
                 return
+            if accepted:
+                self._unsaved = False
+                return
+            if spent is not None:
+                self._rejected.add(spent)
             raise SignInRequiredError("the token endpoint's answer held no token")
         if status >= 500 or status == 429:
             raise TokenEndpointUnavailableError(
                 f"The OAuth token endpoint answered HTTP {status}; will retry"
             )
-        tokens = self.context.current_tokens
-        if tokens is not None and tokens.refresh_token is not None:
-            self._rejected.add(_fingerprint(tokens.refresh_token))
+        if spent is not None:
+            self._rejected.add(spent)
         raise SignInRequiredError(
             f"the authorization server rejected the stored refresh token "
             f"(HTTP {status})"

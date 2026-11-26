@@ -387,9 +387,12 @@ its own provider instead and hands it to the transport (`client.py::_single_serv
   attaches the stored access token, refreshes it when expired or refused (at most once per
   request), and otherwise raises `SignInRequiredError`, a `RuntimeError` whose message becomes
   `backend_status.last_error`. It performs no discovery and no registration, opens no browser and
-  starts no callback listener, so the reconnect backoff reaches only the token endpoint. A refresh
-  token the authorization server rejected is remembered by fingerprint and not sent again by the
-  process. The SDK's flow holds the provider's lock across the authenticated request, which would
+  starts no callback listener, so the reconnect backoff reaches only the token endpoint. The
+  process remembers by fingerprint, and does not send again, a refresh token the authorization
+  server rejected or answered with an unusable HTTP 200 (a server that rotates refresh tokens has
+  probably spent it, and reuse can revoke the grant), and an access token the backend refused right
+  after a refresh. When refreshed tokens cannot be written, `reload()` keeps them in memory instead
+  of reading back the spent refresh token, until a later refresh stores their successors. The SDK's flow holds the provider's lock across the authenticated request, which would
   serialize calls the queue lets run concurrently; `ServiceOAuth` holds it only while preparing a
   token.
 - **`login` is the only interactive path.** `LoginOAuth` runs the SDK's authorization-code flow

@@ -337,9 +337,13 @@ OAuth sign-in required: run `mcp-call-orchestrator-proxy login` (<reason>)
 
 in `last_error`, while the proxy stays connectable. `run` makes no request to the
 authorization server's metadata or registration endpoints, only to its token
-endpoint to refresh, at most once per connection attempt and once per request
-the backend refuses. A refresh token the authorization server rejected is not
-sent again by the same process.
+endpoint to refresh, at most once per request. The same process never sends
+again a refresh token the authorization server rejected, or answered with a
+response it could not use (the server has probably rotated it, and many servers
+revoke the whole grant when a rotated token is reused), nor an access token the
+backend refused right after a refresh. Refreshed tokens that cannot be written
+are kept in memory, with a `WARNING`, until a later refresh stores their
+successors.
 
 - **Token storage.** Tokens, the client registration and the authorization
   server's metadata are stored as JSON files under `MCP_PROXY_OAUTH_TOKEN_DIR`,
