@@ -308,8 +308,12 @@ class ServiceOAuth(_StoredOAuth):
             if not self._initialized:
                 await self._initialize()
             context.protocol_version = request.headers.get(MCP_PROTOCOL_VERSION_HEADER)
-            if context.current_tokens is None or context.client_info is None:
+            if context.current_tokens is None:
                 raise SignInRequiredError("no tokens are stored for this backend")
+            if context.client_info is None:
+                raise SignInRequiredError(
+                    "no client registration is stored for this backend"
+                )
             if _fingerprint(context.current_tokens.access_token) in self._refused:
                 raise SignInRequiredError(
                     "the backend rejected a refreshed access token"

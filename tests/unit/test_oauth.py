@@ -554,3 +554,13 @@ async def test_an_access_token_refused_after_a_refresh_is_not_sent_again(
     assert len(servers.token_requests()) == 1
     # Two backend requests (access-1, then its successor) and one refresh.
     assert len(servers.requests) == 3
+
+
+async def test_a_missing_client_registration_is_named_as_such(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    await _seed(store)
+    await store.delete(f"{URL}/client_info", collection="mcp-oauth-client-info")
+    servers = FakeServers()
+    with pytest.raises(SignInRequiredError, match="no client registration is stored"):
+        await _send(ServiceOAuth(_backend(tmp_path), store), servers)
+    assert servers.requests == []
