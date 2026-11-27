@@ -7,7 +7,9 @@ for the lifetime of the process. FastMCP wraps both stdio and HTTP
 transports with the same lifespan manager, so this one hook covers both.
 
 For an OAuth backend it builds the one ``ServiceOAuth`` provider of the
-process, and the lifespan holds the token directory's lock throughout.
+process, and the lifespan holds the token directory's lock throughout. For a
+stdio backend the lifespan holds the ``BackendStderr`` pipe its subprocesses
+write to.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from mcp_call_orchestrator_proxy.client import (
     build_real_backend_client,
     check_backend_config,
     resolve_backend_url,
+    runs_backend_as_subprocess,
 )
 from mcp_call_orchestrator_proxy.config import ProxySettings, get_settings
 from mcp_call_orchestrator_proxy.config_extensions import (
@@ -52,6 +55,7 @@ from mcp_call_orchestrator_proxy.resilient import (
     ResilientBackend,
 )
 from mcp_call_orchestrator_proxy.server import build_proxy_server
+from mcp_call_orchestrator_proxy.stderr_capture import BackendStderr
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +122,7 @@ def create_proxy_app(
 
     resolved_factory: Callable[[], NegotiatedBackendClient]
     token_lock: TokenDirLock | None = None
+    stderr: BackendStderr | None = None
     if backend_factory is not None:
         resolved_factory = backend_factory
     elif backend_client is not None:
@@ -138,9 +143,14 @@ def create_proxy_app(
 
         resolved_factory = _oauth_factory
     else:
+        if runs_backend_as_subprocess(settings):
+            stderr = BackendStderr()
+        captured = stderr
 
         def _real_factory() -> NegotiatedBackendClient:
-            return build_real_backend_client(settings)
+            return build_real_backend_client(
+                settings, stderr=captured.sink if captured else None
+            )
 
         resolved_factory = _real_factory
 
@@ -152,6 +162,7 @@ def create_proxy_app(
         max_backoff=settings.reconnect_max_backoff_seconds,
         backoff_multiplier=settings.reconnect_backoff_multiplier,
         health_poll=settings.backend_health_poll_seconds,
+        output=stderr,
     )
 
     orchestrator = CallOrchestrator(
@@ -190,6 +201,8 @@ def create_proxy_app(
         with ExitStack() as held:
             if token_lock is not None:
                 held.enter_context(token_lock)
+            if stderr is not None:
+                held.enter_context(stderr)
             # `async with resilient` starts the reconnect supervisor; it does not
             # block on a down backend, so the proxy starts cleanly regardless.
             async with resilient:
@@ -214,7 +227,9 @@ def create_proxy_app(
 
         Lets an agent check backend availability without triggering a failing
         tool call. Returns connection state, the backend URL, when it last
-        connected, and the current reconnect backoff.
+        connected, and the current reconnect backoff. While the backend is down,
+        it also returns the last error and, for a backend the proxy runs as a
+        subprocess, the last lines that subprocess wrote to stderr.
         """
         return resilient.status_snapshot()
 

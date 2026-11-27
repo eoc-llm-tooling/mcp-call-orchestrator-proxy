@@ -39,7 +39,7 @@ import logging
 import random
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 import anyio
 import httpx2
@@ -156,6 +156,18 @@ class BackendUnavailableError(RuntimeError):
     """
 
 
+class BackendOutput(Protocol):
+    """What a stdio backend's subprocesses wrote to stderr, as numbered lines."""
+
+    def mark(self) -> int:
+        """The number of lines read so far."""
+        ...
+
+    def lines_between(self, start: int, end: int | None = None) -> list[str]:
+        """The kept lines numbered from ``start`` up to ``end`` (or the latest)."""
+        ...
+
+
 def _utcnow() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
 
@@ -179,8 +191,10 @@ class ResilientBackend:
         max_backoff: float = 30.0,
         backoff_multiplier: float = 2.0,
         health_poll: float = 5.0,
+        output: BackendOutput | None = None,
     ) -> None:
         self._factory = factory
+        self._output = output
         self._backend_url = backend_url
         self._connect_timeout = connect_timeout
         self._initial_backoff = initial_backoff
@@ -203,6 +217,9 @@ class ResilientBackend:
         self._last_error: str | None = None
         self._consecutive_failures = 0
         self._current_backoff = 0.0
+        # Line numbers in `output` of the connection that ended last: from its
+        # start to the next attempt's start, open-ended until that begins.
+        self._ended_output: tuple[int, int | None] | None = None
 
     def add_connect_listener(
         self, listener: Callable[[], Coroutine[Any, Any, None]]
@@ -266,6 +283,9 @@ class ResilientBackend:
         """Maintain a live backend connection, reconnecting with bounded backoff."""
         delay = self._initial_backoff
         while not self._shutdown.is_set():
+            attempt_mark = self._output.mark() if self._output else 0
+            if self._ended_output is not None and self._ended_output[1] is None:
+                self._ended_output = (self._ended_output[0], attempt_mark)
             try:
                 client = self._factory()
                 # Entering the client negotiates the protocol version with the
@@ -314,12 +334,16 @@ class ResilientBackend:
             except _CONNECTION_ERRORS as exc:
                 self._note_failure(exc, unexpected=False)
             except Exception as exc:
-                # The supervisor must never die: log loudly, then retry.
-                self._note_failure(exc, unexpected=True)
+                # The supervisor must never die: log loudly, then retry. A stdio
+                # backend that exits before answering is an outage, not a fault.
+                self._note_failure(
+                    exc, unexpected=not _is_connection_broken_signal(exc)
+                )
             finally:
                 self._live = None
                 self._broken.clear()
                 self._first_attempt_done.set()
+                self._ended_output = (attempt_mark, None)
 
             if self._shutdown.is_set():
                 break
@@ -390,9 +414,17 @@ class ResilientBackend:
                 else None
             ),
             "last_error": None if connected else self._last_error,
+            "backend_stderr": None if connected else self._ended_output_lines(),
             "consecutive_failures": self._consecutive_failures,
             "current_backoff_seconds": self._current_backoff,
         }
+
+    def _ended_output_lines(self) -> list[str] | None:
+        if self._output is None:
+            return None
+        if self._ended_output is None:
+            return []
+        return self._output.lines_between(*self._ended_output)
 
     def _unavailable_message(self) -> str:
         base = "Backend is not available"

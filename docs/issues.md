@@ -28,6 +28,7 @@ rejected (won't fix or not a bug, reason in Resolution).
 | [PRB-5](#prb-5--a-config-with-more-than-one-server-is-not-refused-at-startup) | A config with more than one server is not refused at startup | backend client (`client.py`) | major | [x] |
 | [PRB-6](#prb-6--a-tool-result-that-does-not-match-its-output-schema-tears-down-the-backend-connection) | A tool result that does not match its output schema tears down the backend connection | backend client (`client.py`) | major | [x] |
 | [PRB-7](#prb-7--a-queued-calls-timeout-counts-its-wait-and-a-call-whose-caller-timed-out-still-runs) | A queued call's timeout counts its wait, and a call whose caller timed out still runs | queue (`orchestrator.py`) | major | [x] |
+| [PRB-8](#prb-8--a-stdio-backend-that-exits-before-answering-is-logged-as-a-proxy-fault-on-every-retry) | A stdio backend that exits before answering is logged as a proxy fault on every retry | resilience (`resilient.py`) | minor | [~] |
 
 ---
 
@@ -346,3 +347,43 @@ as do the unit tests for withdrawal on timeout and on cancellation and for the e
 real clients on both protocol versions, a call whose client cancelled or disconnected while it
 waited was withdrawn and never reached the backend. No `call raised an unexpected error` record
 in three runs of the HTTP component tests.
+
+---
+
+## PRB-8 — A stdio backend that exits before answering is logged as a proxy fault on every retry
+
+**Status:** Fix pending
+**Severity:** minor · **Component:** resilience model ([`resilient.py`](../src/mcp_call_orchestrator_proxy/resilient.py))
+**Raised:** 2026-11-27
+
+**Problem.** A stdio backend whose command exited before it answered the handshake was logged at
+`ERROR`, `resilient: unexpected error in backend supervisor; will retry`, with a full traceback
+ending in `mcp.shared.exceptions.MCPError: Connection closed`, on every reconnect attempt (about
+every 30 s at the default backoff) for as long as the outage lasted. Observed on 2026-11-27 with a
+backend started through `uvx`, which could not resolve the server's package for the pinned
+Python version and exited.
+
+**Impact.** An outage the proxy absorbs by design read as a fault in the proxy, repeated
+without end, against the rule that `WARNING` and above stay quiet while healthy. `backend_status`
+reported only `MCPError: Connection closed`; the reason was in the backend's stderr, which the
+proxy did not see. No call was lost, and the proxy reconnected once the backend could start.
+
+**Cause.** `ResilientBackend._supervise` treated a failed connect attempt as an outage only for
+the transport-level exceptions in `_CONNECTION_ERRORS`. The SDK reports a subprocess that ends
+during the handshake as `MCPError` with code `CONNECTION_CLOSED`, which only the delegated-call
+path recognized (`_is_connection_broken_signal`); in the supervisor it fell to the catch-all for
+unexpected exceptions.
+
+**Urgent action.** none
+
+**Resolution.** 2026-11-27 — The supervisor classifies a failed connect attempt with
+`_is_connection_broken_signal` as well, so a connection closed during the handshake is an
+outage: one `WARNING`, then `DEBUG` per retry. A stdio backend's stderr is kept
+(`BackendStderr`) and `backend_status` reports the lines of the last attempt as
+`backend_stderr`. On branch `fix/backend-status-error`, pull request to follow.
+
+**Verification.** 2026-11-27 —
+`test_a_backend_that_closes_before_answering_is_an_outage_not_a_fault` fails before the fix and
+passes after; `test_an_unexpected_connect_error_is_still_logged_as_a_fault` shows the
+classification stays narrow. `test_backend_status_reports_why_a_stdio_backend_would_not_start`
+runs a backend command that writes to stderr and exits, through the whole proxy.

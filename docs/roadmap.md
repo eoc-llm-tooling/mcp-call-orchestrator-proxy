@@ -25,7 +25,8 @@ nothing here is a scheduled commitment, and the order changes when a real need d
 - **Self-healing** — starts whether or not the backend is up, reconnects with bounded jittered
   backoff, survives backend restarts, stops promptly on `SIGTERM`.
 - **`backend_status`** tells a client whether the backend is reachable without provoking a
-  failing call.
+  failing call, and while it is not, the last error and, for a stdio backend, what its command
+  wrote to stderr.
 - Runs as a **`systemd --user` service**, or under a **per-user `supervisord`** where systemd
   user services are unavailable; configured by env vars or a standard `mcpServers` JSON file.
 - **Fronts stdio backends too** — a backend started as a child process (`command`/`args`/`env`/

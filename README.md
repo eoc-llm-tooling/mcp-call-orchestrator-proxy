@@ -33,8 +33,8 @@ server, unchanged except for the added stability.
   or drops mid-session, and shuts down promptly on `SIGTERM` even mid-backoff.
 - **`backend_status` tool** — lets a client ask "is the backend reachable right
   now?" without triggering a failing call. Returns `connected`, `backend_url`,
-  `last_connected_at`, `last_error`, `consecutive_failures`, and
-  `current_backoff_seconds`.
+  `last_connected_at`, `last_error`, `backend_stderr`, `consecutive_failures`,
+  and `current_backoff_seconds`.
 - **Exposure control** — optional exact-name allow-lists or deny-lists for tools,
   resources (including resource templates) and prompts. Hidden items are absent
   from listings and uncallable by name. Off by default (full parity). See
@@ -436,8 +436,22 @@ backend is currently reachable, instead of guessing from a failed call:
 ```json
 {"connected": true, "backend_url": "https://127.0.0.1:27124/mcp/",
  "last_connected_at": "2026-07-11T18:02:03+00:00", "last_error": null,
- "consecutive_failures": 0, "current_backoff_seconds": 1.0}
+ "backend_stderr": null, "consecutive_failures": 0, "current_backoff_seconds": 1.0}
 ```
+
+While the backend is down, `last_error` says what ended the last connection or
+attempt. For a stdio backend, `backend_stderr` adds the lines its command wrote to
+stderr during that attempt, such as a launcher that could not resolve the server:
+
+```json
+{"connected": false, "backend_url": "<stdio:/path/to/backend.json>",
+ "last_connected_at": null, "last_error": "MCPError: Connection closed",
+ "backend_stderr": ["  × No solution found when resolving tool dependencies:"],
+ "consecutive_failures": 3, "current_backoff_seconds": 4.0}
+```
+
+The same lines still appear in the proxy's own log. `backend_stderr` is `null`
+while connected and for an HTTP backend.
 
 ## Run as a service
 

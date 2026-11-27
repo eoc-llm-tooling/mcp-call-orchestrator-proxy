@@ -281,3 +281,35 @@ def test_an_oauth_entry_uses_the_given_provider_and_verifies_tls(
         ProxySettings(backend_config=config), auth=provider
     )
     assert again.transport.auth is provider
+
+
+def test_a_stdio_backends_stderr_goes_where_it_is_given(tmp_path: Path) -> None:
+    settings = ProxySettings(
+        backend_config=_write_config(tmp_path, {"command": "some-mcp-server"})
+    )
+    with (tmp_path / "stderr").open("w") as sink:
+        client = build_real_backend_client(settings, stderr=sink)
+
+        assert isinstance(client.transport, StdioTransport)
+        assert client.transport.log_file is sink
+
+
+def test_only_a_stdio_entry_runs_the_backend_as_a_subprocess(tmp_path: Path) -> None:
+    (tmp_path / "stdio").mkdir()
+    (tmp_path / "http").mkdir()
+    stdio = ProxySettings(
+        backend_config=_write_config(tmp_path / "stdio", {"command": "some-mcp-server"})
+    )
+    http = ProxySettings(
+        backend_config=_write_config(
+            tmp_path / "http", {"url": "https://127.0.0.1:1/mcp/"}
+        )
+    )
+
+    assert client_module.runs_backend_as_subprocess(stdio) is True
+    assert client_module.runs_backend_as_subprocess(http) is False
+    url_and_key = ProxySettings(
+        backend_mcp_url="https://127.0.0.1:1/mcp/", backend_api_key="a" * 32
+    )
+
+    assert client_module.runs_backend_as_subprocess(url_and_key) is False

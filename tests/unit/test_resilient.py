@@ -17,6 +17,7 @@ Verifies the resilience contract:
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import Any
 
@@ -38,6 +39,7 @@ class BackendController:
 
     def __init__(self) -> None:
         self.connect_ok = True
+        self.connect_error: Exception | None = None
         self.tool_error: Exception | None = None
         self.instructions: str | None = "BACKEND INSTRUCTIONS"
         self.protocol_version = "2026-07-28"
@@ -62,6 +64,8 @@ class FakeClient:
         self.listings = 0
 
     async def __aenter__(self) -> FakeClient:
+        if self._controller.connect_error is not None:
+            raise self._controller.connect_error
         if not self._controller.connect_ok:
             raise RuntimeError("Client failed to connect: simulated backend down")
         self.entered = True
@@ -479,3 +483,111 @@ async def test_backoff_is_bounded_while_down() -> None:
             lambda: backend.status_snapshot()["consecutive_failures"] >= 3
         ), "supervisor did not keep retrying a down backend"
         assert backend.status_snapshot()["current_backoff_seconds"] <= 0.05
+
+
+class FakeOutput:
+    """A ``BackendOutput`` the test writes lines to."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def mark(self) -> int:
+        return len(self.lines)
+
+    def lines_between(self, start: int, end: int | None = None) -> list[str]:
+        return self.lines[start:end]
+
+
+@pytest.mark.asyncio
+async def test_a_backend_that_closes_before_answering_is_an_outage_not_a_fault(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stdio backend that exits during the handshake reaches the supervisor as
+    the SDK's connection-closed ``MCPError``: one warning, no traceback."""
+    controller = BackendController()
+    controller.connect_error = MCPError(
+        code=mcp_types.CONNECTION_CLOSED, message="Connection closed"
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="mcp_call_orchestrator_proxy"):
+        async with _make_backend(controller) as backend:
+            assert await _wait_until(
+                lambda: backend.status_snapshot()["consecutive_failures"] >= 3
+            )
+            assert backend.status_snapshot()["last_error"] == (
+                "MCPError: Connection closed"
+            )
+
+    resilient_records = [
+        r for r in caplog.records if r.name == "mcp_call_orchestrator_proxy.resilient"
+    ]
+    assert [r for r in resilient_records if r.levelno >= logging.ERROR] == []
+    warnings = [r for r in resilient_records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "Connection closed" in warnings[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_connect_error_is_still_logged_as_a_fault(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Counterpart: the classification above is narrow, not a blanket silence."""
+    controller = BackendController()
+    controller.connect_error = ValueError("a bug, not an outage")
+
+    with caplog.at_level(logging.WARNING, logger="mcp_call_orchestrator_proxy"):
+        async with _make_backend(controller) as backend:
+            assert await _wait_until(
+                lambda: backend.status_snapshot()["consecutive_failures"] >= 1
+            )
+
+    assert any(
+        r.levelno == logging.ERROR and r.exc_info is not None for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_reports_the_stderr_of_the_connection_that_ended_last() -> None:
+    """``backend_stderr`` holds what the backend wrote during its last attempt,
+    not what earlier attempts wrote, and nothing while connected."""
+    controller = BackendController()
+    controller.connect_ok = False
+    output = FakeOutput()
+
+    def factory() -> NegotiatedBackendClient:
+        output.lines.append(f"attempt {len(controller.built) + 1}: cannot start")
+        return controller()
+
+    backend = ResilientBackend(
+        factory,
+        backend_url="<stdio:test>",
+        connect_timeout=1.0,
+        initial_backoff=0.01,
+        max_backoff=0.05,
+        health_poll=0.01,
+        output=output,
+    )
+    async with backend:
+        assert await _wait_until(
+            lambda: backend.status_snapshot()["consecutive_failures"] >= 3
+        )
+        reported = backend.status_snapshot()["backend_stderr"]
+        assert len(reported) == 1
+        assert reported[0].endswith(": cannot start")
+        assert reported[0] != "attempt 1: cannot start"
+
+        controller.connect_ok = True
+        assert await _wait_until(lambda: backend.status_snapshot()["connected"])
+        assert backend.status_snapshot()["backend_stderr"] is None
+
+
+@pytest.mark.asyncio
+async def test_reports_no_stderr_for_a_backend_without_one() -> None:
+    controller = BackendController()
+    controller.connect_ok = False
+
+    async with _make_backend(controller) as backend:
+        assert await _wait_until(
+            lambda: backend.status_snapshot()["consecutive_failures"] >= 1
+        )
+        assert backend.status_snapshot()["backend_stderr"] is None

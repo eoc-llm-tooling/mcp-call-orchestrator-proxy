@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import httpx2
 from fastmcp import Client
@@ -81,6 +81,7 @@ def build_real_backend_client(
     *,
     auth: OAuth | None = None,
     init_timeout: float | None = None,
+    stderr: TextIO | None = None,
 ) -> Client[Any]:
     """Build a fastmcp Client for the configured backend.
 
@@ -88,7 +89,9 @@ def build_real_backend_client(
     which such an entry requires; it turns TLS verification on whatever
     `backend_verify_tls` says. `init_timeout` replaces
     `connect_timeout_seconds` as the connect/initialize bound, for `login`,
-    whose first request waits for a person to sign in.
+    whose first request waits for a person to sign in. `stderr` receives a
+    stdio backend's stderr, which otherwise goes to the proxy's own; it must
+    have a file descriptor.
 
     A plain string `auth` is auto-wrapped as Bearer auth by fastmcp;
     `verify=False` disables TLS verification for a self-signed cert.
@@ -106,6 +109,8 @@ def build_real_backend_client(
     client: Client[Any]
     if settings.backend_config:
         transport = _single_server_transport(settings.backend_config, auth=auth)
+        if isinstance(transport, StdioTransport) and stderr is not None:
+            transport.log_file = stderr
         kwargs: dict[str, Any] = {
             "timeout": request_timeout,
             "init_timeout": init_timeout or settings.connect_timeout_seconds,
@@ -231,6 +236,14 @@ def check_backend_config(settings: ProxySettings) -> None:
         return
     config = MCPConfig.from_file(Path(settings.backend_config))
     _require_single_server(config, settings.backend_config)
+
+
+def runs_backend_as_subprocess(settings: ProxySettings) -> bool:
+    """Whether the configured backend is a stdio command the proxy starts."""
+    if not settings.backend_config:
+        return False
+    config = MCPConfig.from_file(Path(settings.backend_config))
+    return isinstance(next(iter(config.mcpServers.values())), StdioMCPServer)
 
 
 def resolve_backend_url(settings: ProxySettings) -> str:

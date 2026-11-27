@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -209,3 +210,45 @@ async def test_stdio_backend_env_is_explicit_not_inherited_from_the_proxy(
 
     assert leaked.data is None, "the proxy's own environment must not reach the child"
     assert declared.data == "bar", "the config's own declared env must reach the child"
+
+
+@pytest.mark.asyncio
+async def test_backend_status_reports_why_a_stdio_backend_would_not_start(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A backend command that fails before it answers says why only on its
+    stderr; ``backend_status`` reports those lines while the backend is down,
+    and they still reach the proxy's own stderr."""
+    reason = "backend cannot start: no matching distribution"
+    config = tmp_path / "backend.json"
+    config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "failing": {
+                        "command": sys.executable,
+                        "args": [
+                            "-c",
+                            f"import sys; sys.stderr.write({reason + chr(10)!r}); "
+                            "sys.exit(1)",
+                        ],
+                    }
+                }
+            }
+        )
+    )
+    settings = ProxySettings(backend_config=str(config), **_RESILIENCE_TUNING)
+    proxy_app = create_proxy_app(settings=settings)
+
+    async with Client(proxy_app.mcp) as client:
+        deadline = time.monotonic() + 10.0
+        while True:
+            snapshot = _status_payload(await client.call_tool("backend_status", {}))
+            if snapshot["backend_stderr"] or time.monotonic() > deadline:
+                break
+            await asyncio.sleep(0.05)
+
+    assert snapshot["connected"] is False
+    assert snapshot["last_error"] == "MCPError: Connection closed"
+    assert snapshot["backend_stderr"] == [reason]
+    assert reason in capfd.readouterr().err

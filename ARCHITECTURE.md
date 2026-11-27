@@ -124,7 +124,8 @@ the Protocol with what a connected client negotiated (capabilities, instructions
 | [`oauth.py`](src/mcp_call_orchestrator_proxy/oauth.py) | OAuth 2.1 for an HTTP backend whose entry says `"auth": "oauth"`: `resolve_oauth_backend` (settings, refusals), and two subclasses of FastMCP's `OAuth` over one store — `ServiceOAuth` for `run` (stored tokens and refresh only) and `LoginOAuth` for `login` (the interactive authorization-code flow). Both store the authorization server's metadata beside the tokens. |
 | [`oauth_store.py`](src/mcp_call_orchestrator_proxy/oauth_store.py) | The token directory: its location, `0700`/`0600` modes and the refusals, the exclusive lock file (`TokenDirLock`), and the JSON file-tree store, Fernet-encrypted when a key is given. |
 | [`oauth_login.py`](src/mcp_call_orchestrator_proxy/oauth_login.py) | The `login` and `logout` procedures the CLI runs. |
-| [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant at startup; builds the transport from the plain entry type whatever FastMCP extension keys the entry carries; forces `keep_alive=False` on a stdio transport; gives the client a session that relays tool results without checking them against their output schema (`RelayClientSession`); gives a streamable-HTTP backend's client a read timeout longer than the call timeout; resolves a human-readable backend URL. |
+| [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant at startup; builds the transport from the plain entry type whatever FastMCP extension keys the entry carries; forces `keep_alive=False` on a stdio transport and points its stderr at the `BackendStderr` pipe; gives the client a session that relays tool results without checking them against their output schema (`RelayClientSession`); gives a streamable-HTTP backend's client a read timeout longer than the call timeout; resolves a human-readable backend URL. |
+| [`stderr_capture.py`](src/mcp_call_orchestrator_proxy/stderr_capture.py) | `BackendStderr` — the pipe a stdio backend's subprocesses write their stderr to. A reader thread copies it unchanged to the proxy's own stderr and keeps the last 20 lines, numbered, for `backend_status`. |
 | [`interfaces.py`](src/mcp_call_orchestrator_proxy/interfaces.py) | `MCPBackendClient` Protocol — the structural contract every layer implements — and `NegotiatedBackendClient`, which adds what a connected client negotiated. |
 | [`resilient.py`](src/mcp_call_orchestrator_proxy/resilient.py) | `ResilientBackend` — owns the one live connection and a background supervisor that keeps it healthy across backend restarts. Sits *below* the orchestrator, so it never adds concurrency. Records what the backend negotiated (`BackendMetadata`) on each connect, and starts each connect listener as a task beside the held connection. Sources `backend_status`. |
 | [`orchestrator.py`](src/mcp_call_orchestrator_proxy/orchestrator.py) | `CallOrchestrator` — MCP-agnostic queue. A single dispatcher pulls FIFO and runs each call as its own task, gated by a semaphore. A call's wait in the queue and its run are each timed out from their own start, so one hang can't wedge the queue; a call whose caller is gone before it starts is dropped and never runs. |
@@ -240,12 +241,19 @@ the Protocol with what a connected client negotiated (capabilities, instructions
   the proxy's (`proxy`). The tasks are cancelled on shutdown. `OverridesAudit` is the one
   listener (see [Description overrides](#description-overrides)).
 - **Supervisor never dies.** Unexpected exceptions are logged and retried, never propagated
-  out of the supervisor loop.
+  out of the supervisor loop. A connect attempt that fails with a transport-level error or a
+  break signal (above) is an outage, logged once at `WARNING`; only any other exception is
+  logged at `ERROR` with its traceback. A stdio backend whose command exits before it answers
+  fails with `CONNECTION_CLOSED`, so it is an outage.
 
 `backend_status` (registered in `app.py`) exposes a snapshot of this state — `connected`,
-`backend_url`, `last_connected_at`, `last_error`, `consecutive_failures`,
+`backend_url`, `last_connected_at`, `last_error`, `backend_stderr`, `consecutive_failures`,
 `current_backoff_seconds` — so a client can check availability without triggering a failing
-call.
+call. While the backend is down, `last_error` is the error that ended the last connection or
+attempt, and for a stdio backend `backend_stderr` is what its subprocess wrote to stderr in that
+attempt: the lines of the latest attempt or connection, from `BackendStderr`, numbered so that
+an earlier attempt's lines are never reported for a later one. Both are `null` while connected;
+`backend_stderr` is always `null` for an HTTP backend.
 
 ## Observability model
 
@@ -422,6 +430,12 @@ A stdio backend's environment is the `mcp` SDK's own doing, not this proxy's: `m
 merges a small safe allowlist (`PATH`, `HOME`, etc. — never the full parent environment) with
 whatever `env` the config declares, so the child never sees the proxy's own environment or
 secrets unless a config explicitly re-declares them.
+
+A stdio backend's stderr goes through `BackendStderr`, an OS pipe the lifespan holds, because the
+SDK hands the stream straight to the subprocess, which needs a file descriptor. What a backend
+writes there still reaches the proxy's own stderr, and so the service log, unchanged; the proxy
+only keeps its latest lines for `backend_status`. That is the only place a stdio backend that
+fails before answering says why: the proxy itself sees the pipe close.
 
 `log_level` is validated to a `Literal` rather than parsed leniently: a silently-ignored
 `--log-level VERBOSE` would leave an operator hunting for `DEBUG` records that were never
