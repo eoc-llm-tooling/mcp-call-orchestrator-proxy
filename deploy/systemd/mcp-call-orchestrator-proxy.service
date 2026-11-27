@@ -17,8 +17,17 @@ ExecStart=__REPO_ROOT__/.venv/bin/mcp-call-orchestrator-proxy run --transport st
 # EnvironmentFile=, whose content systemd reads literally with no expansion.
 Environment=MCP_PROXY_BACKEND_CONFIG=%h/.config/mcp-call-orchestrator-proxy/backend.json
 # TLS verification is separate from the JSON (the format has no verify field).
-# Leave false for a self-signed backend cert (common for local MCP servers):
+# Leave false for a self-signed backend cert (common for local MCP servers).
+# Remove it for an OAuth backend ("auth": "oauth"), which always verifies and
+# refuses false:
 Environment=MCP_PROXY_BACKEND_VERIFY_TLS=false
+
+# OAuth backend ("auth": "oauth" in the JSON): sign in once with `login`, with
+# this unit stopped - see docs/deployment.md "An OAuth backend as a service".
+#Environment=MCP_PROXY_OAUTH_CALLBACK_PORT=27126
+#Environment=MCP_PROXY_OAUTH_SCOPES=
+#LoadCredential=oauth-key:%h/.config/mcp-call-orchestrator-proxy/oauth.key
+#Environment=MCP_PROXY_OAUTH_ENCRYPTION_KEY_FILE=%d/oauth-key
 
 # Optional: override defaults by uncommenting. See README's configuration
 # table. Changing any of these requires `systemctl --user daemon-reload`.

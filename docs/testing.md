@@ -19,6 +19,9 @@ unconditionally. Integration runs in the gate when `tests/integration/backend.js
 
 Each module against fakes, through its own API. Covers per-module logic: settings validation,
 queue ordering and timeout, reconnect/backoff state machine, client construction, proxy wiring.
+The OAuth providers run as httpx auths over an httpx `MockTransport` that plays the backend and
+an authorization server on another origin, so a test sees each request a provider makes; the
+token directory, its lock and its store run against `tmp_path`.
 
 ### Component
 
@@ -80,6 +83,15 @@ neither prompts nor resources, and prompt and resource listings get the JSON-RPC
 (`tests/component/test_tools_only_backend_stdio.py`). The test writes its `command`/`args`
 config itself.
 
+**In-process OAuth backend** (`serve_oauth_backend`) — a FastMCP server with one `echo` tool
+behind FastMCP's `InMemoryOAuthProvider`, served on a loopback port in the test's own process:
+discovery, dynamic client registration, an authorization endpoint that approves at once, and a
+token endpoint that rotates the refresh token on each refresh. In process, so a test reads and
+changes what the authorization server has registered and issued (forget a client, revoke a
+token). `tests/component/test_oauth_http.py` drives `login` against it with a stand-in for
+`webbrowser.open` that follows the redirect to the callback listener from a thread, then `run`
+over real HTTP.
+
 Selection rule: use the spawned server for claims about protocol, protocol version, transport,
 the `client.py` path, or what the backend actually observed; use a mock for backend states that
 must be forced.
@@ -94,6 +106,7 @@ Exposed as fixtures so any tier can use them without cross-directory imports.
 | `spawn_backend` | Factory → `SpawnedBackend` (`.url`, `.start()`, `.kill()`, `.output()`); `legacy=True` serves only the versions before 2026-07-28; killed at teardown. |
 | `backend_config_file` | Factory writing an `mcpServers` JSON for a given URL; returns its path. |
 | `stdio_backend_config_file` | Factory writing an `mcpServers` JSON with a `command`/`args`/`env` entry for the stdio probe backend; returns its path. |
+| `serve_oauth_backend` | Async CM serving an OAuth-protected `echo` backend in process; yields `.url` and `.auth`, its `InMemoryOAuthProvider`. |
 | `make_echo_backend` | `EchoBackend` — one `echo` tool, verbatim, optional delay. |
 | `wrap_observer` | `ConcurrencyObserver` — wraps a backend client, records peak in-flight calls. |
 | `age_cached_listings` | Function `(server, seconds)` moving the timestamps of the server's `ProxyProvider` listing caches back, in place of that much time passing with no listing. |

@@ -27,6 +27,8 @@ from mcp_call_orchestrator_proxy.client import (
     build_real_backend_client,
 )
 from mcp_call_orchestrator_proxy.config import ProxySettings
+from mcp_call_orchestrator_proxy.oauth import OAuthBackend, ServiceOAuth
+from mcp_call_orchestrator_proxy.oauth_store import open_token_store, prepare_token_dir
 
 TRANSFORM_KEYS: list[tuple[str, Any]] = [
     ("tools", {"echo": {"description": "d"}}),
@@ -240,3 +242,42 @@ def test_the_backend_request_timeout_outlasts_the_call_timeout(
     request_timeout = client._session_kwargs["read_timeout_seconds"]
     assert request_timeout is not None
     assert request_timeout > settings.call_timeout_seconds
+
+
+def test_an_oauth_entry_needs_the_proxys_provider(tmp_path: Path) -> None:
+    config = _write_config(
+        tmp_path, {"url": "https://mcp.example.com/mcp", "auth": "oauth"}
+    )
+    with pytest.raises(ValueError, match="needs the proxy's OAuth provider"):
+        build_real_backend_client(ProxySettings(backend_config=config))
+
+
+def test_an_oauth_entry_uses_the_given_provider_and_verifies_tls(
+    tmp_path: Path,
+) -> None:
+    config = _write_config(
+        tmp_path, {"url": "https://mcp.example.com/mcp", "auth": "oauth"}
+    )
+    backend = OAuthBackend(
+        url="https://mcp.example.com/mcp",
+        token_dir=tmp_path / "oauth",
+        callback_host="127.0.0.1",
+        callback_port=27126,
+        client_name="test",
+    )
+    provider = ServiceOAuth(
+        backend, open_token_store(prepare_token_dir(backend.token_dir))
+    )
+
+    client = build_real_backend_client(
+        ProxySettings(backend_config=config), auth=provider
+    )
+
+    assert isinstance(client.transport, StreamableHttpTransport)
+    assert client.transport.auth is provider
+    assert client.transport.verify is True
+    # The same provider serves every client the supervisor builds.
+    again = build_real_backend_client(
+        ProxySettings(backend_config=config), auth=provider
+    )
+    assert again.transport.auth is provider

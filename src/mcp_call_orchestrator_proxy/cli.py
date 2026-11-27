@@ -1,10 +1,12 @@
 """Command line interface using Typer.
 
-Provides a clean entry point: `mcp-call-orchestrator-proxy run`
+Provides a clean entry point: `mcp-call-orchestrator-proxy run`, and for an
+OAuth backend `login` and `logout`.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Annotated, Any, Literal
 
@@ -13,7 +15,8 @@ import typer
 
 from mcp_call_orchestrator_proxy.app import create_proxy_app
 from mcp_call_orchestrator_proxy.client import resolve_backend_url
-from mcp_call_orchestrator_proxy.config import LogLevel, get_settings
+from mcp_call_orchestrator_proxy.config import LogLevel, ProxySettings, get_settings
+from mcp_call_orchestrator_proxy.oauth_login import sign_in, sign_out
 
 app = typer.Typer(
     name="mcp-call-orchestrator-proxy",
@@ -147,6 +150,103 @@ def run(
         f"Starting MCP call-orchestrator proxy on {effective_host}:{effective_port}"
     )
     proxy_app.mcp.run(transport=transport, host=effective_host, port=effective_port)
+
+
+BackendConfigOption = Annotated[
+    str | None,
+    typer.Option(
+        "--backend-config",
+        help="Path to the mcpServers JSON config file; the one `run` uses. "
+        "Overrides MCP_PROXY_BACKEND_CONFIG.",
+    ),
+]
+LoginLogLevelOption = Annotated[
+    str | None,
+    typer.Option(
+        "--log-level",
+        help="DEBUG, INFO, WARNING (default), ERROR or CRITICAL.",
+    ),
+]
+
+
+def _oauth_settings(backend_config: str | None, log_level: str | None) -> ProxySettings:
+    overrides: dict[str, Any] = {}
+    if backend_config is not None:
+        overrides["backend_config"] = backend_config
+    # The service's own log level would bury the sign-in prompt in HTTP records.
+    overrides["log_level"] = log_level or "WARNING"
+    try:
+        settings = get_settings(**overrides)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    _configure_logging(settings.log_level)
+    return settings
+
+
+@app.command()
+def login(
+    backend_config: BackendConfigOption = None,
+    timeout: Annotated[
+        float,
+        typer.Option(
+            "--timeout", help="Seconds to wait for the sign-in in the browser."
+        ),
+    ] = 300.0,
+    no_browser: Annotated[
+        bool,
+        typer.Option(
+            "--no-browser",
+            help="Only print the authorization URL; do not try to open a browser.",
+        ),
+    ] = False,
+    log_level: LoginLogLevelOption = None,
+) -> None:
+    """Sign in to an OAuth backend and store its tokens for `run`.
+
+    Takes the same settings as `run`. Stop a running proxy for this backend
+    first: they share the stored tokens, and only one may write them.
+    """
+    settings = _oauth_settings(backend_config, log_level)
+
+    def announce(url: str) -> None:
+        typer.echo(
+            "Open this URL in a browser to sign in (the browser must reach "
+            f"{settings.oauth_callback_host}:{settings.oauth_callback_port}):\n\n"
+            f"  {url}\n"
+        )
+
+    try:
+        tools = asyncio.run(
+            sign_in(
+                settings,
+                timeout=timeout,
+                announce=announce,
+                open_browser=not no_browser,
+            )
+        )
+    except Exception as exc:
+        typer.echo(f"Sign-in failed: {exc}", err=True)
+        raise typer.Exit(1) from None
+    typer.echo(
+        f"Signed in to {resolve_backend_url(settings)}; it lists {len(tools)} "
+        "tool(s). The tokens are stored for `run`."
+    )
+
+
+@app.command()
+def logout(
+    backend_config: BackendConfigOption = None,
+    log_level: LoginLogLevelOption = None,
+) -> None:
+    """Delete the stored OAuth tokens and client registration for the backend."""
+    settings = _oauth_settings(backend_config, log_level)
+    try:
+        backend = asyncio.run(sign_out(settings))
+    except Exception as exc:
+        typer.echo(f"Sign-out failed: {exc}", err=True)
+        raise typer.Exit(1) from None
+    typer.echo(f"Removed the stored OAuth tokens for {backend.url}.")
 
 
 def main() -> None:

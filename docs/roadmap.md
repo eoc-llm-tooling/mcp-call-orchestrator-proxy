@@ -39,6 +39,11 @@ nothing here is a scheduled commitment, and the order changes when a real need d
   including templates, prompts). Hidden items are absent from listings and uncallable.
   Allow beats deny when both are set for a surface; `backend_status` is filtered like any
   other tool (with a startup warning if the operator's config excludes it). Off by default.
+- **OAuth 2.1 backends** — a remote HTTP backend that requires OAuth (`"auth": "oauth"`) is
+  signed in to once with `login`; the service uses and refreshes the stored tokens unattended,
+  across restarts and reconnects, and reports "sign-in required" when it cannot. Tokens are
+  kept in a private, per-instance directory, keyed by backend URL, optionally encrypted, with
+  one writer at a time.
 - **Description overrides** — an operator file replaces, appends to or prepends to the
   descriptions of tools, arguments, prompts and resources, and the server's `instructions`,
   without touching names or schema structure. The file is checked at startup, and its names
@@ -88,6 +93,9 @@ Ideas without an issue or a release.
   by default, explicit, never a mode you can fall into. Exempt calls may overtake queued ones,
   with deliberately no ordering guarantee between the two lanes, and a hung exempt call still
   can't delay the serialized queue.
+- **Device-code sign-in.** `login` needs a browser that reaches its loopback callback port,
+  locally or through a tunnel. The OAuth device authorization grant (RFC 8628) would sign in from
+  any browser, but neither FastMCP's client nor the MCP SDK implements it.
 - **Metrics.** Queue depth, wait time and backend flaps are logged but nothing aggregates them.
   Worth doing if the logs stop being enough.
 - **Glob patterns in exposure rules.** Exact names first; patterns only if the lists get

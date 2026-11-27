@@ -38,11 +38,14 @@ import sys
 import tempfile
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
 import pytest
 from fastmcp import FastMCP
+from fastmcp.server.auth.auth import ClientRegistrationOptions
+from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
 from fastmcp.server.providers.proxy import ProxyProvider
 from mcp import types as mcp_types
 
@@ -84,6 +87,59 @@ async def serve_proxy_over_http(mcp: FastMCP) -> AsyncIterator[str]:
         server_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await server_task
+        sock.close()
+
+
+@dataclass
+class OAuthBackendServer:
+    """An in-process MCP server that requires a bearer token from its own AS.
+
+    ``auth`` is FastMCP's ``InMemoryOAuthProvider``, serving discovery,
+    dynamic client registration, an authorization endpoint that approves at
+    once, and a token endpoint that rotates the refresh token on each refresh.
+    A test reads and changes its state (``clients``, ``access_tokens``,
+    ``refresh_tokens``) directly.
+    """
+
+    url: str
+    auth: InMemoryOAuthProvider
+
+
+@contextlib.asynccontextmanager
+async def serve_oauth_backend_over_http() -> AsyncIterator[OAuthBackendServer]:
+    """Serve an ``echo`` tool behind OAuth on a loopback port for the block."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    auth = InMemoryOAuthProvider(
+        base_url=f"http://127.0.0.1:{port}",
+        client_registration_options=ClientRegistrationOptions(enabled=True),
+    )
+    server = FastMCP("oauth-backend", auth=auth)
+
+    @server.tool
+    def echo(value: str) -> str:
+        """Echo the given value back verbatim."""
+        return value
+
+    task = asyncio.create_task(
+        server.run_http_async(
+            host="127.0.0.1",
+            port=port,
+            sockets=[sock],
+            transport="http",
+            show_banner=False,
+            log_level="warning",
+        )
+    )
+    try:
+        await _wait_until_accepting("127.0.0.1", port, timeout=10.0)
+        yield OAuthBackendServer(url=f"http://127.0.0.1:{port}/mcp", auth=auth)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
         sock.close()
 
 
@@ -452,6 +508,14 @@ def serve_over_http() -> Callable[
 ]:
     """Return the ``serve_proxy_over_http`` context manager for use in a test."""
     return serve_proxy_over_http
+
+
+@pytest.fixture
+def serve_oauth_backend() -> Callable[
+    [], contextlib.AbstractAsyncContextManager[OAuthBackendServer]
+]:
+    """Return the ``serve_oauth_backend_over_http`` context manager."""
+    return serve_oauth_backend_over_http
 
 
 @pytest.fixture
