@@ -43,6 +43,15 @@ def test_backend_fields_load_from_prefixed_env(
     assert settings.backend_verify_tls is True
 
 
+def test_backend_status_stderr_is_on_unless_turned_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert ProxySettings(backend_api_key="a" * 32).backend_status_stderr is True
+
+    monkeypatch.setenv("MCP_PROXY_BACKEND_STATUS_STDERR", "false")
+    assert ProxySettings(backend_api_key="a" * 32).backend_status_stderr is False
+
+
 def test_settings_env_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCP_PROXY_LISTEN_PORT", "28080")
     settings = ProxySettings(backend_api_key="b" * 32)

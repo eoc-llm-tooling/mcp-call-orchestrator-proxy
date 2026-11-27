@@ -125,7 +125,7 @@ the Protocol with what a connected client negotiated (capabilities, instructions
 | [`oauth_store.py`](src/mcp_call_orchestrator_proxy/oauth_store.py) | The token directory: its location, `0700`/`0600` modes and the refusals, the exclusive lock file (`TokenDirLock`), and the JSON file-tree store, Fernet-encrypted when a key is given. |
 | [`oauth_login.py`](src/mcp_call_orchestrator_proxy/oauth_login.py) | The `login` and `logout` procedures the CLI runs. |
 | [`client.py`](src/mcp_call_orchestrator_proxy/client.py) | Builds the real `fastmcp.Client` from settings (JSON `mcpServers` file — HTTP/SSE **or** stdio (`command`/`args`) — **or** individual env vars, HTTP only). Enforces the single-backend invariant at startup; builds the transport from the plain entry type whatever FastMCP extension keys the entry carries; forces `keep_alive=False` on a stdio transport and points its stderr at the `BackendStderr` pipe; gives the client a session that relays tool results without checking them against their output schema (`RelayClientSession`); gives a streamable-HTTP backend's client a read timeout longer than the call timeout; resolves a human-readable backend URL. |
-| [`stderr_capture.py`](src/mcp_call_orchestrator_proxy/stderr_capture.py) | `BackendStderr` — the pipe a stdio backend's subprocesses write their stderr to. A reader thread copies it unchanged to the proxy's own stderr and keeps the last 20 lines, numbered, for `backend_status`. |
+| [`stderr_capture.py`](src/mcp_call_orchestrator_proxy/stderr_capture.py) | `BackendStderr` — the pipe a stdio backend's subprocesses write their stderr to. A reader thread copies it unchanged to the proxy's own stderr and keeps the last 20 lines, numbered, for `backend_status`: each is cut to 500 characters, a carriage-return redraw is kept as its last state, an unfinished line is held only as far as it can be reported, and obvious secrets are masked. |
 | [`interfaces.py`](src/mcp_call_orchestrator_proxy/interfaces.py) | `MCPBackendClient` Protocol — the structural contract every layer implements — and `NegotiatedBackendClient`, which adds what a connected client negotiated. |
 | [`resilient.py`](src/mcp_call_orchestrator_proxy/resilient.py) | `ResilientBackend` — owns the one live connection and a background supervisor that keeps it healthy across backend restarts. Sits *below* the orchestrator, so it never adds concurrency. Records what the backend negotiated (`BackendMetadata`) on each connect, and starts each connect listener as a task beside the held connection. Sources `backend_status`. |
 | [`orchestrator.py`](src/mcp_call_orchestrator_proxy/orchestrator.py) | `CallOrchestrator` — MCP-agnostic queue. A single dispatcher pulls FIFO and runs each call as its own task, gated by a semaphore. A call's wait in the queue and its run are each timed out from their own start, so one hang can't wedge the queue; a call whose caller is gone before it starts is dropped and never runs. |
@@ -253,7 +253,9 @@ call. While the backend is down, `last_error` is the error that ended the last c
 attempt, and for a stdio backend `backend_stderr` is what its subprocess wrote to stderr in that
 attempt: the lines of the latest attempt or connection, from `BackendStderr`, numbered so that
 an earlier attempt's lines are never reported for a later one. Both are `null` while connected;
-`backend_stderr` is always `null` for an HTTP backend.
+`backend_stderr` is always `null` for an HTTP backend, and with `backend_status_stderr` set to
+`false` for every backend: `backend_status` answers every client of the proxy, so the setting
+lets an operator keep a backend's stderr out of it.
 
 ## Observability model
 
@@ -434,7 +436,8 @@ secrets unless a config explicitly re-declares them.
 A stdio backend's stderr goes through `BackendStderr`, an OS pipe the lifespan holds, because the
 SDK hands the stream straight to the subprocess, which needs a file descriptor. What a backend
 writes there still reaches the proxy's own stderr, and so the service log, unchanged; the proxy
-only keeps its latest lines for `backend_status`. That is the only place a stdio backend that
+only keeps its latest lines for `backend_status`, bounded and with obvious secrets masked, and
+not at all when `backend_status_stderr` is `false`. That is the only place a stdio backend that
 fails before answering says why: the proxy itself sees the pipe close.
 
 `log_level` is validated to a `Literal` rather than parsed leniently: a silently-ignored
