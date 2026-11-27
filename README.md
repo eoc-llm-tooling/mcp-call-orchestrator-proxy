@@ -143,6 +143,7 @@ these instead. `MCP_PROXY_BACKEND_API_KEY` is required in this mode.
 | `MCP_PROXY_BACKEND_API_KEY` | *(required in Option 2)* | Bearer token for the backend. |
 | `MCP_PROXY_BACKEND_MCP_URL` | `https://127.0.0.1:27124/mcp/` | Backend's Streamable HTTP MCP endpoint. |
 | `MCP_PROXY_BACKEND_VERIFY_TLS` | `false` | Verify the backend's TLS cert. `false` is normal for a self-signed cert. |
+| `MCP_PROXY_BACKEND_STATUS_STDERR` | `true` | Report a stdio backend's stderr lines in `backend_status` while it is down. `false` reports none. See [Check backend health](#check-backend-health). |
 | `MCP_PROXY_SERVER_NAME` | `mcp-call-orchestrator-proxy` | Name the proxy reports as its MCP server identity (the `initialize` handshake, or `server/discover`). Some MCP clients (e.g. VS Code/Copilot's tool picker) label/dedupe servers by this rather than by the key you gave the entry in your own client config - set a unique value per instance when running more than one, or they'll look identical to those clients. |
 | `MCP_PROXY_LISTEN_HOST` | `127.0.0.1` | Host the proxy itself binds to. |
 | `MCP_PROXY_LISTEN_PORT` | `27125` | Port the proxy itself listens on. |
@@ -452,6 +453,16 @@ stderr during that attempt, such as a launcher that could not resolve the server
 
 The same lines still appear in the proxy's own log. `backend_stderr` is `null`
 while connected and for an HTTP backend.
+
+`backend_status` answers every client of the proxy, so `backend_stderr` is
+bounded and scrubbed: at most the last 20 lines, each cut to 500 characters; a
+line a command redraws with a carriage return, such as a progress meter, shows
+its last state; and obvious secrets (credentials in a URL, bearer or basic
+credentials, values assigned to a token, secret, password, key or authorization
+name, and JSON web tokens) are replaced by `***`. The masking is a safeguard,
+not a guarantee: stderr can say anything. Where the proxy is shared with clients
+you do not trust, set `MCP_PROXY_BACKEND_STATUS_STDERR=false` so `backend_stderr`
+is always `null`. The proxy's own log keeps the lines unchanged either way.
 
 ## Run as a service
 

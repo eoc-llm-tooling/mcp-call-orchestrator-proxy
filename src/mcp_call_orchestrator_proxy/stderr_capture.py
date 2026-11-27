@@ -10,11 +10,20 @@ and keeps the most recent lines for ``ResilientBackend`` to report in
 
 The subprocess needs a real file descriptor for its stderr, which is why this
 is an OS pipe and not an in-memory stream.
+
+What is kept is bounded and scrubbed. A line that never ends is held only as
+far as it can matter, since a kept line is cut to 500 characters anyway; a
+progress meter that redraws with a carriage return is kept as its last
+redraw; and obvious secrets (credentials in a URL, bearer tokens, values
+assigned to a token, password or key) are masked, because ``backend_status``
+is answered to every client of the proxy. The copy on the proxy's own stderr
+is never altered.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 from collections import deque
@@ -22,6 +31,32 @@ from typing import TextIO
 
 _READ_CHUNK = 65536
 _MAX_LINE_CHARS = 500
+# Four bytes is the most a UTF-8 character takes, so this many bytes of a line
+# always hold the characters that are kept.
+_MAX_LINE_BYTES = 4 * _MAX_LINE_CHARS
+_MASK = "***"
+
+# Conservative on purpose: each pattern names something that is a secret in
+# nearly every context, and a false positive only hides a word.
+_URL_CREDENTIALS = re.compile(r"\b([a-z][a-z0-9+.-]*://)[^\s/@]+@", re.IGNORECASE)
+_ASSIGNED_SECRET = re.compile(
+    r"\b([\w.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|credential|authorization)"
+    r"[\w.-]*[\"']?\s*[=:]\s*[\"']?)"
+    r"(?:(?:bearer|basic)\s+)?[^\s\"',;&]+",
+    re.IGNORECASE,
+)
+_AUTH_SCHEME = re.compile(r"\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
+_JWT = re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+")
+
+
+def redact(line: str) -> str:
+    """Mask the obvious secrets in a line: URL credentials, bearer or basic
+    credentials, values assigned to a token, secret, password, key or
+    authorization name, and JSON web tokens."""
+    line = _URL_CREDENTIALS.sub(rf"\1{_MASK}@", line)
+    line = _ASSIGNED_SECRET.sub(rf"\1{_MASK}", line)
+    line = _AUTH_SCHEME.sub(rf"\1 {_MASK}", line)
+    return _JWT.sub(_MASK, line)
 
 
 class BackendStderr:
@@ -96,13 +131,38 @@ class BackendStderr:
             self._read_fd = None
 
     def _keep(self, chunk: bytes) -> None:
-        *complete, self._partial = (self._partial + chunk).split(b"\n")
+        *complete, rest = (self._partial + chunk).split(b"\n")
+        self._partial = _bounded(rest)
         with self._lock:
             for raw in complete:
-                line = raw.decode("utf-8", errors="replace").rstrip()
+                line = redact(
+                    _last_redraw(raw)[:_MAX_LINE_BYTES]
+                    .decode("utf-8", errors="replace")
+                    .rstrip()
+                )
                 if line:
                     self._lines.append((self._count, line[:_MAX_LINE_CHARS]))
                     self._count += 1
+
+
+def _last_redraw(raw: bytes) -> bytes:
+    """What a terminal would show of a line: the text after its last carriage
+    return, which also drops the ``\\r`` of a ``\\r\\n`` ending."""
+    return raw.rstrip(b"\r").rsplit(b"\r", 1)[-1]
+
+
+def _bounded(partial: bytes) -> bytes:
+    """The unfinished line, reduced to what can still be reported.
+
+    A carriage return restarts the line, so only the text after the last one
+    counts; a trailing one is kept in case a newline follows it. Beyond that,
+    only the start of the line is ever reported, so the rest is dropped as it
+    arrives rather than held.
+    """
+    if b"\r" in partial:
+        trailing = partial.endswith(b"\r")
+        partial = _last_redraw(partial) + (b"\r" if trailing else b"")
+    return partial[:_MAX_LINE_BYTES]
 
 
 def _forward(chunk: bytes) -> None:

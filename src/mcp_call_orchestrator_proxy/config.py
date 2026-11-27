@@ -56,6 +56,14 @@ class ProxySettings(BaseSettings):
         description="Whether to verify the backend's TLS certificate. False for self-signed certs.",
     )
 
+    backend_status_stderr: bool = Field(
+        default=True,
+        description="Whether `backend_status` reports the lines a stdio backend "
+        "wrote to stderr while it is down. They go to every client of the proxy, "
+        "with obvious secrets masked; false reports none. The proxy's own log is "
+        "unaffected.",
+    )
+
     # What agents are told: the operator's description overrides (overrides.py).
     overrides: str | None = Field(
         default=None,

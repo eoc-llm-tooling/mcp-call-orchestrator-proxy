@@ -162,7 +162,7 @@ def create_proxy_app(
         max_backoff=settings.reconnect_max_backoff_seconds,
         backoff_multiplier=settings.reconnect_backoff_multiplier,
         health_poll=settings.backend_health_poll_seconds,
-        output=stderr,
+        output=stderr if settings.backend_status_stderr else None,
     )
 
     orchestrator = CallOrchestrator(

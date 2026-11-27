@@ -252,3 +252,50 @@ async def test_backend_status_reports_why_a_stdio_backend_would_not_start(
     assert snapshot["last_error"] == "MCPError: Connection closed"
     assert snapshot["backend_stderr"] == [reason]
     assert reason in capfd.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_backend_status_keeps_a_stdio_backends_stderr_out_when_told_to(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """With ``backend_status_stderr`` off, ``backend_status`` reports no stderr
+    lines for a backend that is down, and the proxy's own stderr still has them."""
+    reason = "backend cannot start: token=abc123"
+    config = tmp_path / "backend.json"
+    config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "failing": {
+                        "command": sys.executable,
+                        "args": [
+                            "-c",
+                            f"import sys; sys.stderr.write({reason + chr(10)!r}); "
+                            "sys.exit(1)",
+                        ],
+                    }
+                }
+            }
+        )
+    )
+    settings = ProxySettings(
+        backend_config=str(config),
+        backend_status_stderr=False,
+        **_RESILIENCE_TUNING,
+    )
+    proxy_app = create_proxy_app(settings=settings)
+
+    async with Client(proxy_app.mcp) as client:
+        deadline = time.monotonic() + 10.0
+        while True:
+            snapshot = _status_payload(await client.call_tool("backend_status", {}))
+            if snapshot["last_error"] or time.monotonic() > deadline:
+                break
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.3)
+        snapshot = _status_payload(await client.call_tool("backend_status", {}))
+
+    assert snapshot["connected"] is False
+    assert snapshot["last_error"] == "MCPError: Connection closed"
+    assert snapshot["backend_stderr"] is None
+    assert reason in capfd.readouterr().err
