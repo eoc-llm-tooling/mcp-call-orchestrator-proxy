@@ -4,4 +4,4 @@ A Python proxy that fronts a single backend MCP server. Provides stable multi-cl
 management and serialized tool call orchestration using PrefectHQ/fastmcp.
 """
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
