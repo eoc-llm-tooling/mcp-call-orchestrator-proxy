@@ -28,7 +28,7 @@ rejected (won't fix or not a bug, reason in Resolution).
 | [PRB-5](#prb-5--a-config-with-more-than-one-server-is-not-refused-at-startup) | A config with more than one server is not refused at startup | backend client (`client.py`) | major | [x] |
 | [PRB-6](#prb-6--a-tool-result-that-does-not-match-its-output-schema-tears-down-the-backend-connection) | A tool result that does not match its output schema tears down the backend connection | backend client (`client.py`) | major | [x] |
 | [PRB-7](#prb-7--a-queued-calls-timeout-counts-its-wait-and-a-call-whose-caller-timed-out-still-runs) | A queued call's timeout counts its wait, and a call whose caller timed out still runs | queue (`orchestrator.py`) | major | [x] |
-| [PRB-8](#prb-8--a-stdio-backend-that-exits-before-answering-is-logged-as-a-proxy-fault-on-every-retry) | A stdio backend that exits before answering is logged as a proxy fault on every retry | resilience (`resilient.py`) | minor | [~] |
+| [PRB-8](#prb-8--a-stdio-backend-that-exits-before-answering-is-logged-as-a-proxy-fault-on-every-retry) | A stdio backend that exits before answering is logged as a proxy fault on every retry | resilience (`resilient.py`) | minor | [x] |
 
 ---
 
@@ -352,9 +352,9 @@ in three runs of the HTTP component tests.
 
 ## PRB-8 — A stdio backend that exits before answering is logged as a proxy fault on every retry
 
-**Status:** Fix pending
+**Status:** Closed
 **Severity:** minor · **Component:** resilience model ([`resilient.py`](../src/mcp_call_orchestrator_proxy/resilient.py))
-**Raised:** 2026-11-27
+**Raised:** 2026-11-27 · **Closed:** 2026-11-27
 
 **Problem.** A stdio backend whose command exited before it answered the handshake was logged at
 `ERROR`, `resilient: unexpected error in backend supervisor; will retry`, with a full traceback
@@ -380,10 +380,12 @@ unexpected exceptions.
 `_is_connection_broken_signal` as well, so a connection closed during the handshake is an
 outage: one `WARNING`, then `DEBUG` per retry. A stdio backend's stderr is kept
 (`BackendStderr`) and `backend_status` reports the lines of the last attempt as
-`backend_stderr`. On branch `fix/backend-status-error`, pull request to follow.
+`backend_stderr`. Shipped in Forgejo pull request #9 (`aac25cc`).
 
 **Verification.** 2026-11-27 —
 `test_a_backend_that_closes_before_answering_is_an_outage_not_a_fault` fails before the fix and
 passes after; `test_an_unexpected_connect_error_is_still_logged_as_a_fault` shows the
 classification stays narrow. `test_backend_status_reports_why_a_stdio_backend_would_not_start`
-runs a backend command that writes to stderr and exits, through the whole proxy.
+runs a backend command that writes to stderr and exits, through the whole proxy. A proxy fronting
+a `uvx` command whose server release needs a newer Python than the one pinned logged one
+`WARNING` and no `ERROR`, and `backend_status` returned uv's resolution error.
